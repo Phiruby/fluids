@@ -1,4 +1,6 @@
 mod texture;
+mod physics;
+
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -9,6 +11,7 @@ use winit::{
     window::Window,
 };
 use crate::texture::Texture;
+use crate::physics::Cube;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -56,11 +59,17 @@ pub struct State {
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
+    num_indices: u32,
     camera: Camera,
+    #[allow(unused)]
     camera_uniform: CameraUniform,
+    #[allow(unused)]
     camera_bind_group: wgpu::BindGroup,
+    #[allow(unused)]
     camera_buffer: wgpu::Buffer,
     depth_texture: Texture,
+    #[allow(unused)]
+    object: Cube,
 }
 
 #[repr(C)]
@@ -83,7 +92,7 @@ impl CameraUniform {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
+pub(crate) struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
 }
@@ -176,7 +185,7 @@ impl State {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
         let camera = Camera {
-            eye: (0.0, 1.0, 2.0).into(),
+            eye: (0.0, 1.0, 4.0).into(),
             target: (0.0, 0.0, 0.0).into(),
             up: (0.0, 1.0, 0.0).into(),
             aspect: config.width as f32 / config.height as f32,
@@ -251,12 +260,11 @@ impl State {
                 topology: wgpu::PrimitiveTopology::TriangleList, // 1.
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw, // 2.
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
                 polygon_mode: wgpu::PolygonMode::Fill,
                 // Requires Features::DEPTH_CLIP_CONTROL
                 unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -274,18 +282,21 @@ impl State {
             multiview_mask: None, // 5.
             cache: None, // 6.
         });
+        let cube = Cube::new(3, 1.0 / 3.0);
+        let (vertices, indices) = cube.to_renderable();
+        let num_indices = indices.len() as u32;
         let vertex_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Vertex buffer"),
-                contents: bytemuck::cast_slice(VERTICES),
-                usage: wgpu::BufferUsages::VERTEX,
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             }
         );
         let index_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Index buffer"),
-                contents: bytemuck::cast_slice(INDICES),
-                usage: wgpu::BufferUsages::INDEX,
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             }
         );
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
@@ -300,11 +311,13 @@ impl State {
             render_pipeline,
             vertex_buffer,
             index_buffer,
+            num_indices,
             camera,
             camera_bind_group,
             camera_buffer,
             camera_uniform,
             depth_texture,
+            object: cube,
         })
     }
 
@@ -377,13 +390,16 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+            let (vertices, indices) = self.object.to_renderable();
+            self.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            self.queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&indices));
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-            render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -399,7 +415,7 @@ impl State {
     }
 
     fn update(&mut self) {
-        
+        self.object.update();
     }
 }
 
