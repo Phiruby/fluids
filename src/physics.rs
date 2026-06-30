@@ -1,35 +1,121 @@
 use crate::Vertex;
-
+use nalgebra::Vector3;
 #[derive(Debug, Clone)]
 #[allow(unused)]
 struct PhysicsVertex {
-    position: [f32; 3],
-    velocity: [f32; 3],
+    position: Vector3<f32>,
+    velocity: Vector3<f32>,
     renderable: bool,
+    mass: f32
 }
 
 impl From<PhysicsVertex> for Vertex {
     fn from(vertex: PhysicsVertex) -> Self {
         Vertex {
-            position: vertex.position,
+            // hackery to access vector from position: https://docs.rs/nalgebra/latest/nalgebra/base/type.Vector3.html
+            position: vertex.position.data.0[0],
             color: [0.5, 0.0, 0.5],
         }
     }
 }
 
 #[allow(unused)]
-struct GaussianKernel {
+struct CubicKernel {
     h: f32,
 }
 
+impl CubicKernel {
+    pub fn new(h: f32) -> Self {
+        Self { h }
+    }
+    /// Performs pairwise evaluation of caussian kernel betwen the two.
+    /// Index [i][j] of output is W_{ij} = W(x_i - x_j).
+    /// Cubic kernel is impl of (4) in https://arxiv.org/pdf/2009.06944
+    fn eval(&self, x_i: &[Vector3<f32>], x_j: &[Vector3<f32>]) -> Vec<Vec<f32>> {
+        let mut W = vec![vec![0.0; x_j.len()]; x_i.len()];
+        let sigma = 8.0 / (std::f32::consts::PI * self.h.powf(3.0));
+        for i in 0..x_i.len() {
+            for j in 0..x_j.len() {
+                let r = x_i[i] - x_j[j];
+                // TODO: r_norm shouldn't be squared; I derived the gradient assuming its square-rooted at the end
+                let r_norm = r.norm();
+                let q = r_norm / self.h;
+                if 0.0 <= q && q <= 0.5 {
+                    W[i][j] = 6.0 * (q.powf(3.0) - q.powf(2.0) + 1.0/6.0);
+                } else if 0.5 < q && q <= 1.0 {
+                    W[i][j] = 2.0 * (1.0 - q).powf(3.0);
+                } else {
+                    W[i][j] = 0.0;
+                }
+                W[i][j] *= sigma;
+            }
+        }
+        W
+    }
+
+    /// Returns gradient w.r.t x_i's of W_{ij} = W(x_i - x_j);
+    /// i.e this returns Matrix so that G[i][j] = nabla_i W_{ij}
+    fn gradient(&self, x_i: &[Vector3<f32>], x_j: &[Vector3<f32>]) -> Vec<Vec<Vector3<f32>>> {
+        let mut G = vec![vec![Vector3::new(0.0, 0.0, 0.0); x_j.len()]; x_i.len()];
+        let sigma = 8.0 / (std::f32::consts::PI * self.h.powf(3.0));
+        for i in 0..x_i.len() {
+            for j in 0..x_j.len() {
+                let r = x_i[i] - x_j[j];
+                let r_norm = r.norm();
+                let q = r_norm / self.h;
+                let partial_q_partial_xi = |basis| 2.0 * x_i[i][basis] / (self.h.powf(2.0) * q);
+                let pqpx = Vector3::new(partial_q_partial_xi(0), partial_q_partial_xi(1), partial_q_partial_xi(2));
+                if 0.0 <= q && q <= 0.5 {
+                    G[i][j] = 18.0 * q.powf(2.0) * pqpx - 12.0 * q * pqpx;
+                } else if 0.5 < q && q <= 1.0 {
+                    // G[i][j] = Vector3::new(
+                    //     -6.0 * (1.0 - q).powf(2.0) * pqpx0,
+                    //     -6.0 * (1.0 - q).powf(2.0) * pqpx1,
+                    //     -6.0 * (1.0 - q).powf(2.0) * pqpx2,
+                    // );
+                    G[i][j] = -6.0 * (1.0 - q).powf(2.0) * pqpx;
+                } else {
+                    G[i][j] = Vector3::zeros();
+                }
+                G[i][j] *= sigma;
+            }
+        }
+        G
+    }
+}
+
 #[derive(Debug)]
-pub struct Cube {
+struct CubeShape {
     pub vertices: Vec<PhysicsVertex>,
     n: usize,
     t: f32,
 }
 
+#[derive(Debug)]
+pub struct Cube {
+    reference: CubeShape,
+    reference_volumes: Vec<f32>,
+    pub current: CubeShape,
+}
+
 impl Cube {
+    pub fn new(n: usize, spacing: f32) -> Self {
+        let reference = CubeShape::new(n, spacing);
+        let reference_densities = compute_densities(&reference.vertices, &CubicKernel::new(spacing));
+        let reference_volumes = reference_densities.iter().zip(reference.vertices.iter()).map(|(d, v)| v.mass / d).collect();
+        Self { reference, reference_volumes, current: CubeShape::new(n, spacing) }
+    }
+
+    pub fn update(&mut self) {
+        self.current.update();
+    }
+
+    pub fn to_renderable(&self) -> (Vec<Vertex>, Vec<u16>) {
+        self.current.to_renderable()
+    }
+}
+
+impl CubeShape {
     pub fn new(n: usize, spacing: f32) -> Self {
         let mut vertices = Vec::new();
         for i in 0..n {
@@ -42,9 +128,10 @@ impl Cube {
                         || j == n - 1
                         || k == n - 1;
                     vertices.push(PhysicsVertex {
-                        position: [i as f32 * spacing, j as f32 * spacing, k as f32 * spacing],
-                        velocity: [0.0, 0.0, 0.0],
+                        position: Vector3::new(i as f32 * spacing, j as f32 * spacing, k as f32 * spacing),
+                        velocity: Vector3::new(0.0, 0.0, 0.0),
                         renderable,
+                        mass: 1.0,
                     });
                 }
             }
@@ -59,7 +146,7 @@ impl Cube {
     pub fn update(&mut self) {
         self.t += 0.001;
         for v in self.vertices.iter_mut() {
-            v.position[0] += 0.0 * self.t;
+            v.position.x += 0.0 * self.t;
         }
     }
 
@@ -163,20 +250,38 @@ impl Cube {
     }
 }
 
+/// Eq (11) in https://arxiv.org/pdf/2009.06944
+fn compute_densities(vertices: &[PhysicsVertex], kernel: &CubicKernel) -> Vec<f32> {
+    let positions = vertices.iter().map(|v| v.position).collect::<Vec<Vector3<f32>>>();
+    let W = kernel.eval(&positions, &positions);
+    let mut densities = vec![0.0; vertices.len()];
+    for i in 0..vertices.len() {
+        for j in 0..vertices.len() {
+            densities[i] += vertices[j].mass * W[i][j];
+        }
+    }
+    densities
+}
+
+fn deformation_tensor(current_vertices: &[PhysicsVertex], reference_vertices: &[PhysicsVertex]) -> Vec<Vec<f32>> {
+    todo!() // might wanna work on spatial hashing first
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn smoketest_cube_new() {
-        let cube = Cube::new(3, 1.0);
+        let cube = CubeShape::new(3, 1.0);
         assert_eq!(cube.vertices.len(), 27);
         assert_eq!(cube.vertices.iter().filter(|v| v.renderable).count(), 26);
     }
 
     #[test]
     fn test_renderable() {
-        let cube = Cube::new(2, 1.0);
+        let cube = CubeShape::new(2, 1.0);
         let (vertices, indices) = cube.to_renderable();
         assert_eq!(vertices.len(), 8);
         assert_eq!(indices.len(), 36);
@@ -185,10 +290,21 @@ mod tests {
 
     #[test]
     fn test_renderable_n3() {
-        let cube = Cube::new(3, 1.0);
+        let cube = CubeShape::new(3, 1.0);
         let (vertices, indices) = cube.to_renderable();
         assert_eq!(vertices.len(), 26);
         assert_eq!(indices.len(), 6 * 4 * 6);
         assert_eq!(indices.len() % 3, 0);
+    }
+
+    #[test]
+    fn test_cubic_kernel() {
+        let kernel = CubicKernel::new(1.0);
+        let x_i = vec![Vector3::new(0.0, 0.0, 0.0)];
+        let x_j = vec![Vector3::new(1.0, 0.0, 0.0)];
+        let W = kernel.eval(&x_i, &x_j);
+        assert_eq!(W.len(), 1);
+        assert_eq!(W[0].len(), 1);
+        assert_eq!(W[0][0], 0.0);
     }
 }
