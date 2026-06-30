@@ -1,5 +1,6 @@
 mod texture;
 mod physics;
+mod camera;
 
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -12,6 +13,7 @@ use winit::{
 };
 use crate::texture::Texture;
 use crate::physics::Cube;
+use crate::camera::CameraController;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -28,7 +30,7 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_co
     cgmath::Vector4::new(0.0, 0.0, 0.5, 1.0),
 );
 
-struct Camera {
+pub(crate) struct Camera {
     eye: cgmath::Point3<f32>,
     target: cgmath::Point3<f32>,
     up: cgmath::Vector3<f32>,
@@ -61,7 +63,7 @@ pub struct State {
     index_buffer: wgpu::Buffer,
     num_indices: u32,
     camera: Camera,
-    #[allow(unused)]
+    camera_controller: CameraController,
     camera_uniform: CameraUniform,
     #[allow(unused)]
     camera_bind_group: wgpu::BindGroup,
@@ -313,6 +315,7 @@ impl State {
             index_buffer,
             num_indices,
             camera,
+            camera_controller: CameraController::new(),
             camera_bind_group,
             camera_buffer,
             camera_uniform,
@@ -407,15 +410,32 @@ impl State {
         Ok(())
     }
 
-    fn handle_key(&self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
-        match (code, is_pressed) {
-            (KeyCode::Escape, true) => event_loop.exit(),
-            _ => {}
+    fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
+        if code == KeyCode::Escape && is_pressed {
+            event_loop.exit();
+            return;
         }
+        self.camera_controller.process_key(code, is_pressed);
+    }
+
+    fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
+        self.camera_controller.process_mouse_button(button, state);
+    }
+
+    fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
+        self.camera_controller
+            .process_cursor_moved(position, &mut self.camera);
     }
 
     fn update(&mut self) {
         self.object.update();
+        self.camera_controller.update_camera(&mut self.camera);
+        self.camera_uniform.update_view_projection(&self.camera);
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
     }
 }
 
@@ -529,6 +549,12 @@ impl ApplicationHandler<State> for App {
                     },
                 ..
             } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            WindowEvent::MouseInput { state: button_state, button, .. } => {
+                state.handle_mouse_button(button, button_state);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                state.handle_cursor_moved(position);
+            }
             _ => {}
         }
     }

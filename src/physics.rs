@@ -59,7 +59,7 @@ impl Cube {
     pub fn update(&mut self) {
         self.t += 0.001;
         for v in self.vertices.iter_mut() {
-            v.position[0] += 0.1 * self.t;
+            v.position[0] += 0.0 * self.t;
         }
     }
 
