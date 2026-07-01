@@ -1,12 +1,14 @@
+mod spatialhash;
 use crate::Vertex;
-use nalgebra::Vector3;
+use crate::physics::spatialhash::SpatialHash;
+use nalgebra::{Matrix3, Vector3};
 #[derive(Debug, Clone)]
 #[allow(unused)]
 struct PhysicsVertex {
     position: Vector3<f32>,
     velocity: Vector3<f32>,
     renderable: bool,
-    mass: f32
+    mass: f32,
 }
 
 impl From<PhysicsVertex> for Vertex {
@@ -41,7 +43,7 @@ impl CubicKernel {
                 let r_norm = r.norm();
                 let q = r_norm / self.h;
                 if 0.0 <= q && q <= 0.5 {
-                    W[i][j] = 6.0 * (q.powf(3.0) - q.powf(2.0) + 1.0/6.0);
+                    W[i][j] = 6.0 * (q.powf(3.0) - q.powf(2.0) + 1.0 / 6.0);
                 } else if 0.5 < q && q <= 1.0 {
                     W[i][j] = 2.0 * (1.0 - q).powf(3.0);
                 } else {
@@ -64,7 +66,11 @@ impl CubicKernel {
                 let r_norm = r.norm();
                 let q = r_norm / self.h;
                 let partial_q_partial_xi = |basis| 2.0 * x_i[i][basis] / (self.h.powf(2.0) * q);
-                let pqpx = Vector3::new(partial_q_partial_xi(0), partial_q_partial_xi(1), partial_q_partial_xi(2));
+                let pqpx = Vector3::new(
+                    partial_q_partial_xi(0),
+                    partial_q_partial_xi(1),
+                    partial_q_partial_xi(2),
+                );
                 if 0.0 <= q && q <= 0.5 {
                     G[i][j] = 18.0 * q.powf(2.0) * pqpx - 12.0 * q * pqpx;
                 } else if 0.5 < q && q <= 1.0 {
@@ -101,9 +107,18 @@ pub struct Cube {
 impl Cube {
     pub fn new(n: usize, spacing: f32) -> Self {
         let reference = CubeShape::new(n, spacing);
-        let reference_densities = compute_densities(&reference.vertices, &CubicKernel::new(spacing));
-        let reference_volumes = reference_densities.iter().zip(reference.vertices.iter()).map(|(d, v)| v.mass / d).collect();
-        Self { reference, reference_volumes, current: CubeShape::new(n, spacing) }
+        let reference_densities =
+            compute_densities(&reference.vertices, &CubicKernel::new(spacing));
+        let reference_volumes = reference_densities
+            .iter()
+            .zip(reference.vertices.iter())
+            .map(|(d, v)| v.mass / d)
+            .collect();
+        Self {
+            reference,
+            reference_volumes,
+            current: CubeShape::new(n, spacing),
+        }
     }
 
     pub fn update(&mut self) {
@@ -121,14 +136,14 @@ impl CubeShape {
         for i in 0..n {
             for j in 0..n {
                 for k in 0..n {
-                    let renderable = i == 0
-                        || j == 0
-                        || k == 0
-                        || i == n - 1
-                        || j == n - 1
-                        || k == n - 1;
+                    let renderable =
+                        i == 0 || j == 0 || k == 0 || i == n - 1 || j == n - 1 || k == n - 1;
                     vertices.push(PhysicsVertex {
-                        position: Vector3::new(i as f32 * spacing, j as f32 * spacing, k as f32 * spacing),
+                        position: Vector3::new(
+                            i as f32 * spacing,
+                            j as f32 * spacing,
+                            k as f32 * spacing,
+                        ),
                         velocity: Vector3::new(0.0, 0.0, 0.0),
                         renderable,
                         mass: 1.0,
@@ -136,7 +151,11 @@ impl CubeShape {
                 }
             }
         }
-        Self { vertices, n, t: 0.0 }
+        Self {
+            vertices,
+            n,
+            t: 0.0,
+        }
     }
 
     fn grid_index(&self, i: usize, j: usize, k: usize) -> usize {
@@ -252,7 +271,10 @@ impl CubeShape {
 
 /// Eq (11) in https://arxiv.org/pdf/2009.06944
 fn compute_densities(vertices: &[PhysicsVertex], kernel: &CubicKernel) -> Vec<f32> {
-    let positions = vertices.iter().map(|v| v.position).collect::<Vec<Vector3<f32>>>();
+    let positions = vertices
+        .iter()
+        .map(|v| v.position)
+        .collect::<Vec<Vector3<f32>>>();
     let W = kernel.eval(&positions, &positions);
     let mut densities = vec![0.0; vertices.len()];
     for i in 0..vertices.len() {
@@ -263,10 +285,58 @@ fn compute_densities(vertices: &[PhysicsVertex], kernel: &CubicKernel) -> Vec<f3
     densities
 }
 
-fn deformation_tensor(current_vertices: &[PhysicsVertex], reference_vertices: &[PhysicsVertex]) -> Vec<Vec<f32>> {
-    todo!() // might wanna work on spatial hashing first
+fn pairwise_displacement(x: &[PhysicsVertex], y: &[PhysicsVertex]) -> Vec<Vec<Vector3<f32>>> {
+    let mut displacements = vec![vec![Vector3::new(0.0, 0.0, 0.0); y.len()]; x.len()];
+    for i in 0..x.len() {
+        for j in 0..y.len() {
+            displacements[i][j] = x[i].position - y[j].position;
+        }
+    }
+    displacements
 }
 
+fn strain_tensor(deformation: &Matrix3<f32>) -> Matrix3<f32> {
+    0.5 * (deformation + deformation.transpose()) - Matrix3::identity()
+}
+
+fn stress_tensor(deformation: &Matrix3<f32>, mu: f32, lambda: f32) -> Matrix3<f32> {
+    let strain = strain_tensor(deformation);
+    2.0 * mu * strain + lambda * strain.trace() * Matrix3::identity()
+}
+
+/// Naive impl of (153) in https://arxiv.org/pdf/2009.06944
+fn deformation_tensor(
+    current_vertices: &[PhysicsVertex],
+    reference_vertices: &[PhysicsVertex],
+    reference_volumes: &[f32],
+    kernel: &CubicKernel,
+    current_spatialhash: &SpatialHash<PhysicsVertex>,
+) -> Vec<Matrix3<f32>> {
+    let x_ij = pairwise_displacement(current_vertices, current_vertices);
+    // TODO: gradients for referece conf can be precomputed
+    let gradients = kernel.gradient(
+        &reference_vertices
+            .iter()
+            .map(|v| v.position)
+            .collect::<Vec<_>>(),
+        &reference_vertices
+            .iter()
+            .map(|v| v.position)
+            .collect::<Vec<_>>(),
+    );
+    let mut deformations: Vec<Matrix3<f32>> = Vec::with_capacity(current_vertices.len());
+    for i in 0..current_vertices.len() {
+        let mut F_i = Matrix3::zeros();
+        for j in 0..reference_vertices.len() {
+            let x_ij = x_ij[i][j];
+            let grad_W_ij = gradients[i][j];
+            let V_j = reference_volumes[j];
+            F_i += V_j * x_ij * grad_W_ij.transpose();
+        }
+        deformations.push(F_i);
+    }
+    deformations
+}
 
 #[cfg(test)]
 mod tests {
