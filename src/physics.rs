@@ -113,7 +113,7 @@ pub struct Cube {
 
 impl Cube {
     pub fn new(n: usize, spacing: f32, kernel: &CubicKernel) -> Self {
-        let reference = CubeShape::new(n, spacing);
+        let reference = CubeShape::new(n, spacing / 5.0);
         let reference_densities =
             compute_densities(&reference.vertices, kernel);
         
@@ -156,7 +156,7 @@ impl Cube {
 
     pub fn update(&mut self) {
         let forces = compute_forces(self, &self.kernel);
-        self.current.vertices.iter_mut().zip(forces).for_each(|(v, f)| v.velocity += f * 0.001 / v.mass);
+        self.current.vertices.iter_mut().zip(forces).for_each(|(v, f)| v.velocity -= f * 0.01 / v.mass);
         self.current.update();
     }
 
@@ -198,9 +198,9 @@ impl CubeShape {
     }
 
     pub fn update(&mut self) {
-        self.t += 0.001;
+        self.t += 0.01;
         for v in self.vertices.iter_mut() {
-            v.position += v.velocity * 0.001;
+            v.position += v.velocity * 0.01;
         }
     }
 
@@ -340,7 +340,7 @@ fn compute_rotations(deformations: &[Matrix3<f32>]) -> Vec<Matrix3<f32>> {
     for i in 0..deformations.len() {
         // TODO: can be a lot faster if we don't use polar decomp;
         // also unsure from the paper whether this is right
-        let (R_i, _) = deformations[i].polar();
+        let (_, R_i) = deformations[i].polar();
         rotations.push(R_i);
     }
     rotations
@@ -448,7 +448,7 @@ pub fn compute_forces(shape: &Cube, kernel: &CubicKernel) -> Vec<Vector3<f32>> {
         &kernel,
     );
     let reference_volumes = &shape.reference_volumes;
-    let stress_tensors = stress_tensor(&deformations_star, 0.5, 0.5);
+    let stress_tensors = stress_tensor(&deformations_star, 1.0, 1.5);
     let mut forces = Vec::with_capacity(current.vertices.len());
     for i in 0..current.vertices.len() {
         let mut force = Vector3::zeros();
