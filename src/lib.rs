@@ -12,7 +12,7 @@ use winit::{
     window::Window,
 };
 use crate::texture::Texture;
-use crate::physics::Cube;
+use crate::physics::{Cube, CubicKernel};
 use crate::camera::CameraController;
 
 #[cfg(target_arch = "wasm32")]
@@ -72,6 +72,7 @@ pub struct State {
     depth_texture: Texture,
     #[allow(unused)]
     object: Cube,
+    kernel: CubicKernel,
 }
 
 #[repr(C)]
@@ -284,7 +285,8 @@ impl State {
             multiview_mask: None, // 5.
             cache: None, // 6.
         });
-        let cube = Cube::new(3, 1.0 / 3.0);
+        let kernel = CubicKernel::new(1.0 / 5.0);
+        let cube = Cube::new(3, 1.0 / 3.0, &kernel);
         let (vertices, indices) = cube.to_renderable();
         let num_indices = indices.len() as u32;
         let vertex_buffer = device.create_buffer_init(
@@ -321,6 +323,7 @@ impl State {
             camera_uniform,
             depth_texture,
             object: cube,
+            kernel
         })
     }
 

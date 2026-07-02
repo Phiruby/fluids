@@ -1,6 +1,6 @@
 mod spatialhash;
 use crate::Vertex;
-use crate::physics::spatialhash::SpatialHash;
+use crate::physics::spatialhash::SpatialHash3D;
 use nalgebra::{Matrix3, Vector3};
 #[derive(Debug, Clone)]
 #[allow(unused)]
@@ -22,7 +22,7 @@ impl From<PhysicsVertex> for Vertex {
 }
 
 #[allow(unused)]
-struct CubicKernel {
+pub struct CubicKernel {
     h: f32,
 }
 
@@ -33,7 +33,11 @@ impl CubicKernel {
     /// Performs pairwise evaluation of caussian kernel betwen the two.
     /// Index [i][j] of output is W_{ij} = W(x_i - x_j).
     /// Cubic kernel is impl of (4) in https://arxiv.org/pdf/2009.06944
-    fn eval(&self, x_i: &[Vector3<f32>], x_j: &[Vector3<f32>]) -> Vec<Vec<f32>> {
+    fn eval(
+        &self, 
+        x_i: &[Vector3<f32>], 
+        x_j: &[Vector3<f32>],
+    ) -> Vec<Vec<f32>> {
         let mut W = vec![vec![0.0; x_j.len()]; x_i.len()];
         let sigma = 8.0 / (std::f32::consts::PI * self.h.powf(3.0));
         for i in 0..x_i.len() {
@@ -97,27 +101,55 @@ struct CubeShape {
     t: f32,
 }
 
+/// reference_gradients: [i][j] = nabla_i W_{ij}
 #[derive(Debug)]
 pub struct Cube {
     reference: CubeShape,
+    L: Vec<Matrix3<f32>>,
+    reference_gradients: Vec<Vec<Vector3<f32>>>,
     reference_volumes: Vec<f32>,
     pub current: CubeShape,
 }
 
 impl Cube {
-    pub fn new(n: usize, spacing: f32) -> Self {
+    pub fn new(n: usize, spacing: f32, kernel: &CubicKernel) -> Self {
         let reference = CubeShape::new(n, spacing);
         let reference_densities =
-            compute_densities(&reference.vertices, &CubicKernel::new(spacing));
-        let reference_volumes = reference_densities
+            compute_densities(&reference.vertices, kernel);
+        
+        let reference_volumes: Vec<f32> = reference_densities
             .iter()
-            .zip(reference.vertices.iter())
+            .zip(&reference.vertices)
             .map(|(d, v)| v.mass / d)
             .collect();
+
+        let reference_gradients = kernel.gradient(
+            &reference.vertices
+                .iter()
+                .map(|v| v.position)
+                .collect::<Vec<_>>(),
+            &reference.vertices
+                .iter()
+                .map(|v| v.position)
+                .collect::<Vec<_>>(),
+        );
+        let reference_distances = pairwise_displacement(&reference.vertices, &reference.vertices);
+
+        let mut L = Vec::with_capacity(reference.vertices.len());
+        for i in 0..reference.vertices.len() {
+            let mut L_i = Matrix3::zeros();
+            for j in 0..reference.vertices.len() {
+                L_i += reference_volumes[j] * reference_gradients[i][j] * reference_distances[i][j].transpose();
+            }
+            L.push(L_i.try_inverse().unwrap());
+        }
+        
         Self {
             reference,
             reference_volumes,
             current: CubeShape::new(n, spacing),
+            L,
+            reference_gradients,
         }
     }
 
@@ -299,43 +331,134 @@ fn strain_tensor(deformation: &Matrix3<f32>) -> Matrix3<f32> {
     0.5 * (deformation + deformation.transpose()) - Matrix3::identity()
 }
 
-fn stress_tensor(deformation: &Matrix3<f32>, mu: f32, lambda: f32) -> Matrix3<f32> {
-    let strain = strain_tensor(deformation);
-    2.0 * mu * strain + lambda * strain.trace() * Matrix3::identity()
+
+fn compute_rotations(deformations: &[Matrix3<f32>]) -> Vec<Matrix3<f32>> {
+    let mut rotations: Vec<Matrix3<f32>> = Vec::with_capacity(deformations.len());
+    for i in 0..deformations.len() {
+        // TODO: can be a lot faster if we don't use polar decomp;
+        // also unsure from the paper whether this is right
+        let (R_i, _) = deformations[i].polar();
+        rotations.push(R_i);
+    }
+    rotations
 }
 
-/// Naive impl of (153) in https://arxiv.org/pdf/2009.06944
-fn deformation_tensor(
+fn initial_deformation_tensor_estimate(
     current_vertices: &[PhysicsVertex],
     reference_vertices: &[PhysicsVertex],
+    reference_gradients: &[Vec<Vector3<f32>>],
+    L: &[Matrix3<f32>],
     reference_volumes: &[f32],
     kernel: &CubicKernel,
-    current_spatialhash: &SpatialHash<PhysicsVertex>,
+    current_spatialhash: &SpatialHash3D<PhysicsVertex>,
 ) -> Vec<Matrix3<f32>> {
     let x_ij = pairwise_displacement(current_vertices, current_vertices);
-    // TODO: gradients for referece conf can be precomputed
-    let gradients = kernel.gradient(
-        &reference_vertices
-            .iter()
-            .map(|v| v.position)
-            .collect::<Vec<_>>(),
-        &reference_vertices
-            .iter()
-            .map(|v| v.position)
-            .collect::<Vec<_>>(),
-    );
+    let X_ij = pairwise_displacement(reference_vertices, reference_vertices);
+
     let mut deformations: Vec<Matrix3<f32>> = Vec::with_capacity(current_vertices.len());
     for i in 0..current_vertices.len() {
         let mut F_i = Matrix3::zeros();
         for j in 0..reference_vertices.len() {
             let x_ij = x_ij[i][j];
-            let grad_W_ij = gradients[i][j];
+            let grad_W_ij = reference_gradients[i][j];
             let V_j = reference_volumes[j];
             F_i += V_j * x_ij * grad_W_ij.transpose();
         }
-        deformations.push(F_i);
+        deformations.push(L[i] * F_i);
     }
     deformations
+}
+
+/// Naive impl of (159) in https://arxiv.org/pdf/2009.06944
+fn deformation_tensor_star(
+    current_vertices: &[PhysicsVertex],
+    reference_vertices: &[PhysicsVertex],
+    reference_gradients_star: &[Vec<Vector3<f32>>],
+    rotations: &[Matrix3<f32>],
+    reference_volumes: &[f32],
+    kernel: &CubicKernel,
+    current_spatialhash: &SpatialHash3D<PhysicsVertex>,
+) -> Vec<Matrix3<f32>> {
+    let X_ij = pairwise_displacement(reference_vertices, reference_vertices);
+    let x_ij = pairwise_displacement(current_vertices, current_vertices);
+    let mut deformations_star = Vec::with_capacity(current_vertices.len());
+    for i in 0..current_vertices.len() {
+        let mut F_i_star = Matrix3::zeros();
+        let R_i = rotations[i];
+        for j in 0..reference_vertices.len() {
+            let X_ij = X_ij[i][j];
+            let x_ij = x_ij[i][j];
+            let grad_W_ij_star = reference_gradients_star[i][j];
+            let V_j = reference_volumes[j];
+            F_i_star += V_j * (x_ij - R_i * X_ij) * grad_W_ij_star.transpose();
+        }
+        deformations_star.push(F_i_star + Matrix3::identity());
+    }
+    deformations_star
+}
+
+/// impl of (158) in https://arxiv.org/pdf/2009.06944
+fn compute_grad_star(
+    gradients: &[Vec<Vector3<f32>>],
+    rotations: &[Matrix3<f32>],
+    L: &[Matrix3<f32>],
+) -> Vec<Vec<Vector3<f32>>> {
+    let mut grad_star = Vec::with_capacity(gradients.len());
+    for i in 0..gradients.len() {
+        grad_star.push(Vec::with_capacity(gradients[i].len()));
+        for j in 0..gradients[i].len() {
+            grad_star[i].push(rotations[i] * L[i] * gradients[i][j]);
+        }
+    }
+    grad_star
+}
+
+fn stress_tensor(
+    deformations_star: &[Matrix3<f32>],
+    mu: f32,
+    lambda: f32
+) -> Vec<Matrix3<f32>> {
+    let mut stress_tensors = Vec::with_capacity(deformations_star.len());
+    for i in 0..deformations_star.len() {
+        let strain = strain_tensor(&deformations_star[i]);
+        stress_tensors.push(2.0 * mu * strain + lambda * strain.trace() * Matrix3::identity());
+    }
+    stress_tensors
+}
+
+pub fn compute_forces(shape: &Cube, spatialhash: &SpatialHash3D<PhysicsVertex>, kernel: &CubicKernel) -> Vec<Vector3<f32>> {
+    let current = &shape.current;
+    let initial_deformations = initial_deformation_tensor_estimate(
+        &current.vertices,
+        &shape.reference.vertices,
+        &shape.reference_gradients,
+        &shape.L,
+        &shape.reference_volumes,
+        &kernel,
+        spatialhash,
+    );
+    let rotations = compute_rotations(&initial_deformations);
+    let grad_star = compute_grad_star(&shape.reference_gradients, &rotations, &shape.L);
+    let deformations_star = deformation_tensor_star(
+        &current.vertices,
+        &shape.reference.vertices,
+        &grad_star,
+        &rotations,
+        &shape.reference_volumes,
+        &kernel,
+        spatialhash,
+    );
+    let reference_volumes = &shape.reference_volumes;
+    let stress_tensors = stress_tensor(&deformations_star, 0.5, 0.5);
+    let mut forces = Vec::with_capacity(current.vertices.len());
+    for i in 0..current.vertices.len() {
+        let mut force = Vector3::zeros();
+        for j in 0..current.vertices.len() {
+            force += reference_volumes[i] * reference_volumes[j] * (stress_tensors[i] * grad_star[i][j] - stress_tensors[j] * grad_star[j][i]);
+        }
+        forces.push(force);
+    }
+    forces
 }
 
 #[cfg(test)]
