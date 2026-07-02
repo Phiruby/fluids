@@ -285,8 +285,8 @@ impl State {
             multiview_mask: None, // 5.
             cache: None, // 6.
         });
-        let kernel = CubicKernel::new(1.0 / 5.0);
-        let cube = Cube::new(3, 1.0 / 3.0, &kernel);
+        let kernel = CubicKernel::new(1.0 / 4.0);
+        let cube = Cube::new(5, 1.0 / 5.0, &kernel);
         let (vertices, indices) = cube.to_renderable();
         let num_indices = indices.len() as u32;
         let vertex_buffer = device.create_buffer_init(

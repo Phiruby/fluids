@@ -21,7 +21,7 @@ impl From<PhysicsVertex> for Vertex {
     }
 }
 
-#[allow(unused)]
+#[derive(Debug, Clone)]
 pub struct CubicKernel {
     h: f32,
 }
@@ -68,8 +68,12 @@ impl CubicKernel {
             for j in 0..x_j.len() {
                 let r = x_i[i] - x_j[j];
                 let r_norm = r.norm();
+                if r_norm == 0.0 {
+                    G[i][j] = Vector3::zeros();
+                    continue;
+                }
                 let q = r_norm / self.h;
-                let partial_q_partial_xi = |basis| 2.0 * x_i[i][basis] / (self.h.powf(2.0) * q);
+                let partial_q_partial_xi = |basis| r[basis] / (self.h * q);
                 let pqpx = Vector3::new(
                     partial_q_partial_xi(0),
                     partial_q_partial_xi(1),
@@ -78,11 +82,6 @@ impl CubicKernel {
                 if 0.0 <= q && q <= 0.5 {
                     G[i][j] = 18.0 * q.powf(2.0) * pqpx - 12.0 * q * pqpx;
                 } else if 0.5 < q && q <= 1.0 {
-                    // G[i][j] = Vector3::new(
-                    //     -6.0 * (1.0 - q).powf(2.0) * pqpx0,
-                    //     -6.0 * (1.0 - q).powf(2.0) * pqpx1,
-                    //     -6.0 * (1.0 - q).powf(2.0) * pqpx2,
-                    // );
                     G[i][j] = -6.0 * (1.0 - q).powf(2.0) * pqpx;
                 } else {
                     G[i][j] = Vector3::zeros();
@@ -109,6 +108,7 @@ pub struct Cube {
     reference_gradients: Vec<Vec<Vector3<f32>>>,
     reference_volumes: Vec<f32>,
     pub current: CubeShape,
+    kernel: CubicKernel,
 }
 
 impl Cube {
@@ -150,10 +150,13 @@ impl Cube {
             current: CubeShape::new(n, spacing),
             L,
             reference_gradients,
+            kernel: kernel.clone(),
         }
     }
 
     pub fn update(&mut self) {
+        let forces = compute_forces(self, &self.kernel);
+        self.current.vertices.iter_mut().zip(forces).for_each(|(v, f)| v.velocity += f * 0.001 / v.mass);
         self.current.update();
     }
 
@@ -197,7 +200,7 @@ impl CubeShape {
     pub fn update(&mut self) {
         self.t += 0.001;
         for v in self.vertices.iter_mut() {
-            v.position.x += 0.0 * self.t;
+            v.position += v.velocity * 0.001;
         }
     }
 
@@ -350,7 +353,6 @@ fn initial_deformation_tensor_estimate(
     L: &[Matrix3<f32>],
     reference_volumes: &[f32],
     kernel: &CubicKernel,
-    current_spatialhash: &SpatialHash3D<PhysicsVertex>,
 ) -> Vec<Matrix3<f32>> {
     let x_ij = pairwise_displacement(current_vertices, current_vertices);
     let X_ij = pairwise_displacement(reference_vertices, reference_vertices);
@@ -377,7 +379,6 @@ fn deformation_tensor_star(
     rotations: &[Matrix3<f32>],
     reference_volumes: &[f32],
     kernel: &CubicKernel,
-    current_spatialhash: &SpatialHash3D<PhysicsVertex>,
 ) -> Vec<Matrix3<f32>> {
     let X_ij = pairwise_displacement(reference_vertices, reference_vertices);
     let x_ij = pairwise_displacement(current_vertices, current_vertices);
@@ -426,7 +427,7 @@ fn stress_tensor(
     stress_tensors
 }
 
-pub fn compute_forces(shape: &Cube, spatialhash: &SpatialHash3D<PhysicsVertex>, kernel: &CubicKernel) -> Vec<Vector3<f32>> {
+pub fn compute_forces(shape: &Cube, kernel: &CubicKernel) -> Vec<Vector3<f32>> {
     let current = &shape.current;
     let initial_deformations = initial_deformation_tensor_estimate(
         &current.vertices,
@@ -435,7 +436,6 @@ pub fn compute_forces(shape: &Cube, spatialhash: &SpatialHash3D<PhysicsVertex>, 
         &shape.L,
         &shape.reference_volumes,
         &kernel,
-        spatialhash,
     );
     let rotations = compute_rotations(&initial_deformations);
     let grad_star = compute_grad_star(&shape.reference_gradients, &rotations, &shape.L);
@@ -446,7 +446,6 @@ pub fn compute_forces(shape: &Cube, spatialhash: &SpatialHash3D<PhysicsVertex>, 
         &rotations,
         &shape.reference_volumes,
         &kernel,
-        spatialhash,
     );
     let reference_volumes = &shape.reference_volumes;
     let stress_tensors = stress_tensor(&deformations_star, 0.5, 0.5);
