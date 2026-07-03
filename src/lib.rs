@@ -12,7 +12,7 @@ use winit::{
     window::Window,
 };
 use crate::texture::Texture;
-use crate::physics::{Cube, CubicKernel};
+use crate::physics::{Cube, CubicKernel, SpatialHash3D};
 use crate::camera::CameraController;
 
 #[cfg(target_arch = "wasm32")]
@@ -73,6 +73,7 @@ pub struct State {
     #[allow(unused)]
     object: Cube,
     kernel: CubicKernel,
+    spatial_hash: SpatialHash3D<Vec<usize>>,
 }
 
 #[repr(C)]
@@ -285,8 +286,10 @@ impl State {
             multiview_mask: None, // 5.
             cache: None, // 6.
         });
-        let kernel = CubicKernel::new(1.0 / 4.0);
-        let cube = Cube::new(5, 1.0 / 5.0, &kernel);
+        let kernel = CubicKernel::new(1.0 / 8.0);
+        let mut spatial_hash =
+            SpatialHash3D::new((16, 16, 16), || Vec::new(), kernel.h);
+        let cube = Cube::new(5, 1.0 / 5.0, &kernel, &mut spatial_hash);
         let (vertices, indices) = cube.to_renderable();
         let num_indices = indices.len() as u32;
         let vertex_buffer = device.create_buffer_init(
@@ -323,7 +326,8 @@ impl State {
             camera_uniform,
             depth_texture,
             object: cube,
-            kernel
+            kernel,
+            spatial_hash,
         })
     }
 
@@ -431,7 +435,7 @@ impl State {
     }
 
     fn update(&mut self) {
-        self.object.update();
+        self.object.update(&mut self.spatial_hash);
         self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_projection(&self.camera);
         self.queue.write_buffer(

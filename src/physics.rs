@@ -1,7 +1,8 @@
 mod spatialhash;
+pub use spatialhash::SpatialHash3D;
 use crate::Vertex;
-use crate::physics::spatialhash::SpatialHash3D;
 use nalgebra::{Matrix3, Vector3};
+use std::ops::Add;
 #[derive(Debug, Clone)]
 #[allow(unused)]
 struct PhysicsVertex {
@@ -10,6 +11,7 @@ struct PhysicsVertex {
     renderable: bool,
     mass: f32,
 }
+
 
 impl From<PhysicsVertex> for Vertex {
     fn from(vertex: PhysicsVertex) -> Self {
@@ -21,9 +23,28 @@ impl From<PhysicsVertex> for Vertex {
     }
 }
 
+fn neighbor_sum<F, T>(
+    delta: F,
+    hash: &SpatialHash3D<Vec<usize>>,
+    position: Vector3<f32>,
+    zero: T,
+) -> T
+where
+    F: Fn(usize) -> T,
+    T: Add<Output = T>,
+{
+    let mut sum = zero;
+    for (_, cell_residents) in hash.neighbors(position) {
+        for neighbor_idx in cell_residents {
+            sum = sum + delta(*neighbor_idx);
+        }
+    }
+    sum
+}
+
 #[derive(Debug, Clone)]
 pub struct CubicKernel {
-    h: f32,
+    pub h: f32,
 }
 
 impl CubicKernel {
@@ -43,7 +64,6 @@ impl CubicKernel {
         for i in 0..x_i.len() {
             for j in 0..x_j.len() {
                 let r = x_i[i] - x_j[j];
-                // TODO: r_norm shouldn't be squared; I derived the gradient assuming its square-rooted at the end
                 let r_norm = r.norm();
                 let q = r_norm / self.h;
                 if 0.0 <= q && q <= 0.5 {
@@ -112,10 +132,20 @@ pub struct Cube {
 }
 
 impl Cube {
-    pub fn new(n: usize, spacing: f32, kernel: &CubicKernel) -> Self {
-        let reference = CubeShape::new(n, spacing / 5.0);
-        let reference_densities =
-            compute_densities(&reference.vertices, kernel);
+    pub fn new(
+        n: usize,
+        spacing: f32,
+        kernel: &CubicKernel,
+        hash: &mut SpatialHash3D<Vec<usize>>,
+    ) -> Self {
+        let reference = CubeShape::new_static(n, spacing / 2.0);
+        hash.clear(&mut |cell| cell.clear());
+        for (idx, v) in reference.vertices.iter().enumerate() {
+            hash.insert(v.position, idx);
+        }
+        let reference_densities = compute_densities(&reference.vertices, kernel, hash);
+        // NOTE: inserting hash just for compute_densities and clearing
+        hash.clear(&mut |cell| cell.clear());
         
         let reference_volumes: Vec<f32> = reference_densities
             .iter()
@@ -134,12 +164,12 @@ impl Cube {
                 .collect::<Vec<_>>(),
         );
         let reference_distances = pairwise_displacement(&reference.vertices, &reference.vertices);
-
         let mut L = Vec::with_capacity(reference.vertices.len());
         for i in 0..reference.vertices.len() {
             let mut L_i = Matrix3::zeros();
             for j in 0..reference.vertices.len() {
-                L_i += reference_volumes[j] * reference_gradients[i][j] * reference_distances[i][j].transpose();
+                // NOTE: this uses inverse of (154) instead of the provided formula (156) in https://arxiv.org/pdf/2009.06944
+                L_i += reference_volumes[j] * reference_distances[j][i] * reference_gradients[i][j].transpose();
             }
             L.push(L_i.try_inverse().unwrap());
         }
@@ -147,16 +177,20 @@ impl Cube {
         Self {
             reference,
             reference_volumes,
-            current: CubeShape::new(n, spacing),
+            current: CubeShape::new(n, spacing, hash),
             L,
             reference_gradients,
             kernel: kernel.clone(),
         }
     }
 
-    pub fn update(&mut self) {
-        let forces = compute_forces(self, &self.kernel);
-        self.current.vertices.iter_mut().zip(forces).for_each(|(v, f)| v.velocity -= f * 0.01 / v.mass);
+    pub fn update(&mut self, hash: &mut SpatialHash3D<Vec<usize>>) {
+        hash.clear(&mut |cell| cell.clear());
+        self.current.update_hash(hash);
+        let forces = compute_forces(self, &self.kernel, hash);
+        self.current.vertices.iter_mut().zip(forces).for_each(|(v, f)| {
+            v.velocity += f * 0.01 / v.mass;
+        });
         self.current.update();
     }
 
@@ -166,8 +200,11 @@ impl Cube {
 }
 
 impl CubeShape {
-    pub fn new(n: usize, spacing: f32) -> Self {
+    fn build_vertices(n: usize, spacing: f32) -> Vec<PhysicsVertex> {
         let mut vertices = Vec::new();
+        let spacing_x = 0.1;
+        let spacing_y = 0.1;
+        let spacing_z = spacing;
         for i in 0..n {
             for j in 0..n {
                 for k in 0..n {
@@ -175,9 +212,9 @@ impl CubeShape {
                         i == 0 || j == 0 || k == 0 || i == n - 1 || j == n - 1 || k == n - 1;
                     vertices.push(PhysicsVertex {
                         position: Vector3::new(
-                            i as f32 * spacing,
-                            j as f32 * spacing,
-                            k as f32 * spacing,
+                            i as f32 * spacing_x,
+                            j as f32 * spacing_y,
+                            k as f32 * spacing_z,
                         ),
                         velocity: Vector3::new(0.0, 0.0, 0.0),
                         renderable,
@@ -186,10 +223,30 @@ impl CubeShape {
                 }
             }
         }
+        vertices
+    }
+
+    fn new_static(n: usize, spacing: f32) -> Self {
         Self {
-            vertices,
+            vertices: Self::build_vertices(n, spacing),
             n,
             t: 0.0,
+        }
+    }
+
+    pub fn new(n: usize, spacing: f32, hash: &mut SpatialHash3D<Vec<usize>>) -> Self {
+        let mut this = Self {
+            vertices: Self::build_vertices(n, spacing),
+            n,
+            t: 0.0,
+        };
+        this.update_hash(hash);
+        this
+    }
+
+    pub fn update_hash(&mut self, hash: &mut SpatialHash3D<Vec<usize>>) {
+        for (idx, v) in self.vertices.iter().enumerate() {
+            hash.insert(v.position, idx);
         }
     }
 
@@ -305,19 +362,38 @@ impl CubeShape {
 }
 
 /// Eq (11) in https://arxiv.org/pdf/2009.06944
-fn compute_densities(vertices: &[PhysicsVertex], kernel: &CubicKernel) -> Vec<f32> {
-    let positions = vertices
-        .iter()
-        .map(|v| v.position)
-        .collect::<Vec<Vector3<f32>>>();
-    let W = kernel.eval(&positions, &positions);
+fn compute_densities(
+    vertices: &[PhysicsVertex],
+    kernel: &CubicKernel,
+    hash: &SpatialHash3D<Vec<usize>>,
+) -> Vec<f32> {
     let mut densities = vec![0.0; vertices.len()];
     for i in 0..vertices.len() {
-        for j in 0..vertices.len() {
-            densities[i] += vertices[j].mass * W[i][j];
-        }
+        let pos_i = vertices[i].position;
+        densities[i] = neighbor_sum(
+            |j| {
+                let r = pos_i - vertices[j].position;
+                vertices[j].mass * kernel_weight(kernel, r.norm())
+            },
+            hash,
+            pos_i,
+            0.0,
+        );
     }
     densities
+}
+
+fn kernel_weight(kernel: &CubicKernel, r_norm: f32) -> f32 {
+    let sigma = 8.0 / (std::f32::consts::PI * kernel.h.powf(3.0));
+    let q = r_norm / kernel.h;
+    let w = if (0.0..=0.5).contains(&q) {
+        6.0 * (q.powf(3.0) - q.powf(2.0) + 1.0 / 6.0)
+    } else if (0.5..=1.0).contains(&q) {
+        2.0 * (1.0 - q).powf(3.0)
+    } else {
+        0.0
+    };
+    w * sigma
 }
 
 fn pairwise_displacement(x: &[PhysicsVertex], y: &[PhysicsVertex]) -> Vec<Vec<Vector3<f32>>> {
@@ -348,25 +424,26 @@ fn compute_rotations(deformations: &[Matrix3<f32>]) -> Vec<Matrix3<f32>> {
 
 fn initial_deformation_tensor_estimate(
     current_vertices: &[PhysicsVertex],
-    reference_vertices: &[PhysicsVertex],
     reference_gradients: &[Vec<Vector3<f32>>],
     L: &[Matrix3<f32>],
     reference_volumes: &[f32],
-    kernel: &CubicKernel,
+    hash: &SpatialHash3D<Vec<usize>>,
 ) -> Vec<Matrix3<f32>> {
-    let x_ij = pairwise_displacement(current_vertices, current_vertices);
-    let X_ij = pairwise_displacement(reference_vertices, reference_vertices);
-
     let mut deformations: Vec<Matrix3<f32>> = Vec::with_capacity(current_vertices.len());
     for i in 0..current_vertices.len() {
-        let mut F_i = Matrix3::zeros();
-        for j in 0..reference_vertices.len() {
-            let x_ij = x_ij[i][j];
-            let grad_W_ij = reference_gradients[i][j];
-            let V_j = reference_volumes[j];
-            F_i += V_j * x_ij * grad_W_ij.transpose();
-        }
-        deformations.push(L[i] * F_i);
+        let pos_i = current_vertices[i].position;
+        let f_i = neighbor_sum(
+            |j| {
+                let x_ji = current_vertices[j].position - pos_i;
+                let grad_w_ij = reference_gradients[i][j];
+                let v_j = reference_volumes[j];
+                v_j * x_ji * grad_w_ij.transpose()
+            },
+            hash,
+            pos_i,
+            Matrix3::zeros(),
+        );
+        deformations.push(L[i] * f_i);
     }
     deformations
 }
@@ -378,22 +455,26 @@ fn deformation_tensor_star(
     reference_gradients_star: &[Vec<Vector3<f32>>],
     rotations: &[Matrix3<f32>],
     reference_volumes: &[f32],
-    kernel: &CubicKernel,
+    hash: &SpatialHash3D<Vec<usize>>,
 ) -> Vec<Matrix3<f32>> {
-    let X_ij = pairwise_displacement(reference_vertices, reference_vertices);
-    let x_ij = pairwise_displacement(current_vertices, current_vertices);
     let mut deformations_star = Vec::with_capacity(current_vertices.len());
     for i in 0..current_vertices.len() {
-        let mut F_i_star = Matrix3::zeros();
-        let R_i = rotations[i];
-        for j in 0..reference_vertices.len() {
-            let X_ij = X_ij[i][j];
-            let x_ij = x_ij[i][j];
-            let grad_W_ij_star = reference_gradients_star[i][j];
-            let V_j = reference_volumes[j];
-            F_i_star += V_j * (x_ij - R_i * X_ij) * grad_W_ij_star.transpose();
-        }
-        deformations_star.push(F_i_star + Matrix3::identity());
+        let r_i = rotations[i];
+        let pos_i = current_vertices[i].position;
+        let ref_pos_i = reference_vertices[i].position;
+        let f_i_star = neighbor_sum(
+            |j| {
+                let x_ji = current_vertices[j].position - pos_i;
+                let x_ji_ref = reference_vertices[j].position - ref_pos_i;
+                let grad_w_ij_star = reference_gradients_star[i][j];
+                let v_j = reference_volumes[j];
+                v_j * (x_ji - r_i * x_ji_ref) * grad_w_ij_star.transpose()
+            },
+            hash,
+            pos_i,
+            Matrix3::zeros(),
+        );
+        deformations_star.push(f_i_star + Matrix3::identity());
     }
     deformations_star
 }
@@ -427,15 +508,18 @@ fn stress_tensor(
     stress_tensors
 }
 
-pub fn compute_forces(shape: &Cube, kernel: &CubicKernel) -> Vec<Vector3<f32>> {
+pub fn compute_forces(
+    shape: &Cube,
+    _kernel: &CubicKernel,
+    hash: &SpatialHash3D<Vec<usize>>,
+) -> Vec<Vector3<f32>> {
     let current = &shape.current;
     let initial_deformations = initial_deformation_tensor_estimate(
         &current.vertices,
-        &shape.reference.vertices,
         &shape.reference_gradients,
         &shape.L,
         &shape.reference_volumes,
-        &kernel,
+        hash,
     );
     let rotations = compute_rotations(&initial_deformations);
     let grad_star = compute_grad_star(&shape.reference_gradients, &rotations, &shape.L);
@@ -445,16 +529,22 @@ pub fn compute_forces(shape: &Cube, kernel: &CubicKernel) -> Vec<Vector3<f32>> {
         &grad_star,
         &rotations,
         &shape.reference_volumes,
-        &kernel,
+        hash,
     );
     let reference_volumes = &shape.reference_volumes;
-    let stress_tensors = stress_tensor(&deformations_star, 1.0, 1.5);
+    let stress_tensors = stress_tensor(&deformations_star, 1.0, 0.0);
     let mut forces = Vec::with_capacity(current.vertices.len());
     for i in 0..current.vertices.len() {
-        let mut force = Vector3::zeros();
-        for j in 0..current.vertices.len() {
-            force += reference_volumes[i] * reference_volumes[j] * (stress_tensors[i] * grad_star[i][j] - stress_tensors[j] * grad_star[j][i]);
-        }
+        let pos_i = current.vertices[i].position;
+        let force = neighbor_sum(
+            |j| {
+                reference_volumes[i] * reference_volumes[j]
+                    * (stress_tensors[i] * grad_star[i][j] - stress_tensors[j] * grad_star[j][i])
+            },
+            hash,
+            pos_i,
+            Vector3::zeros(),
+        );
         forces.push(force);
     }
     forces
@@ -464,16 +554,22 @@ pub fn compute_forces(shape: &Cube, kernel: &CubicKernel) -> Vec<Vector3<f32>> {
 mod tests {
     use super::*;
 
+    fn test_hash() -> SpatialHash3D<Vec<usize>> {
+        SpatialHash3D::new((8, 8, 8), || Vec::new(), 1.0)
+    }
+
     #[test]
     fn smoketest_cube_new() {
-        let cube = CubeShape::new(3, 1.0);
+        let mut hash = test_hash();
+        let cube = CubeShape::new(3, 1.0, &mut hash);
         assert_eq!(cube.vertices.len(), 27);
         assert_eq!(cube.vertices.iter().filter(|v| v.renderable).count(), 26);
     }
 
     #[test]
     fn test_renderable() {
-        let cube = CubeShape::new(2, 1.0);
+        let mut hash = test_hash();
+        let cube = CubeShape::new(2, 1.0, &mut hash);
         let (vertices, indices) = cube.to_renderable();
         assert_eq!(vertices.len(), 8);
         assert_eq!(indices.len(), 36);
@@ -482,7 +578,8 @@ mod tests {
 
     #[test]
     fn test_renderable_n3() {
-        let cube = CubeShape::new(3, 1.0);
+        let mut hash = test_hash();
+        let cube = CubeShape::new(3, 1.0, &mut hash);
         let (vertices, indices) = cube.to_renderable();
         assert_eq!(vertices.len(), 26);
         assert_eq!(indices.len(), 6 * 4 * 6);
@@ -498,5 +595,36 @@ mod tests {
         assert_eq!(W.len(), 1);
         assert_eq!(W[0].len(), 1);
         assert_eq!(W[0][0], 0.0);
+    }
+
+    #[test]
+    fn test_stress_tensor_zero() {
+        let deformation = Matrix3::identity();
+        let stress = stress_tensor(
+            &[deformation], 0.0, 0.0
+        )[0];
+        assert_eq!(stress, Matrix3::zeros());
+    }
+
+    #[test]
+    fn no_deformation() {
+        let mut hash = test_hash();
+        let mut cube = Cube::new(3, 1.0, &CubicKernel::new(1.0), &mut hash);
+        hash.clear(&mut |cell| cell.clear());
+        cube.current.update_hash(&mut hash);
+        let deformations = initial_deformation_tensor_estimate(
+            &cube.reference.vertices,
+            &cube.reference_gradients,
+            &cube.L,
+            &cube.reference_volumes,
+            &hash,
+        );
+        assert!(deformations[0].relative_eq(&Matrix3::identity(), 1e-6, 1e-6));
+    }
+    #[test]
+    fn test_neighbor_sum() {
+        let hash = SpatialHash3D::new((3, 3, 3), || Vec::new(), 1.0);
+        let sum = neighbor_sum(|idx| idx, &hash, Vector3::new(0.0, 0.0, 0.0), 0);
+        assert_eq!(sum, 0);
     }
 }
