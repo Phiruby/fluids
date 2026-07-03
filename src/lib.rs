@@ -12,7 +12,7 @@ use winit::{
     window::Window,
 };
 use crate::texture::Texture;
-use crate::physics::{Cube, CubicKernel, SpatialHash3D};
+use crate::physics::{Cube, CubicKernel};
 use crate::camera::CameraController;
 
 #[cfg(target_arch = "wasm32")]
@@ -59,9 +59,11 @@ pub struct State {
     is_surface_configured: bool,
     window: Arc<Window>,
     render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
+    particle_mesh_buffer: wgpu::Buffer,
+    particle_instance_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
+    num_instances: u32,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -72,8 +74,6 @@ pub struct State {
     depth_texture: Texture,
     #[allow(unused)]
     object: Cube,
-    kernel: CubicKernel,
-    spatial_hash: SpatialHash3D<Vec<usize>>,
 }
 
 #[repr(C)]
@@ -102,33 +102,67 @@ pub(crate) struct Vertex {
 }
 
 impl Vertex {
-    const ATTRIBUTES: &[wgpu::VertexAttribute] = &wgpu::vertex_attr_array![
-        0 => Float32x3,
-        1 => Float32x3,
-    ];
-
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRIBUTES,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
         }
     }
 }
 
-const VERTICES: &[Vertex] = &[
-    Vertex { position: [-0.0868241, 0.49240386, 0.0], color: [0.5, 0.0, 0.5] }, // A
-    Vertex { position: [-0.49513406, 0.06958647, 0.0], color: [0.5, 0.0, 0.5] }, // B
-    Vertex { position: [-0.21918549, -0.44939706, 0.0], color: [0.5, 0.0, 0.5] }, // C
-    Vertex { position: [0.35966998, -0.3473291, 0.0], color: [0.5, 0.0, 0.5] }, // D
-    Vertex { position: [0.44147372, 0.2347359, 0.0], color: [0.5, 0.0, 0.5] }, // E
-];
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct ParticleMeshVertex {
+    position: [f32; 3],
+}
 
-const INDICES: &[u16] = &[
-    0, 1, 4,
-    1, 2, 4,
-    2, 3, 4,
-];
+impl ParticleMeshVertex {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ParticleMeshVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x3,
+            }],
+        }
+    }
+}
+
+fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
+    let vertices = [
+        ParticleMeshVertex { position: [-radius, -radius, -radius] },
+        ParticleMeshVertex { position: [ radius, -radius, -radius] },
+        ParticleMeshVertex { position: [ radius,  radius, -radius] },
+        ParticleMeshVertex { position: [-radius,  radius, -radius] },
+        ParticleMeshVertex { position: [-radius, -radius,  radius] },
+        ParticleMeshVertex { position: [ radius, -radius,  radius] },
+        ParticleMeshVertex { position: [ radius,  radius,  radius] },
+        ParticleMeshVertex { position: [-radius,  radius,  radius] },
+    ];
+    let indices = [
+        0, 1, 2, 0, 2, 3,
+        4, 6, 5, 4, 7, 6,
+        0, 4, 5, 0, 5, 1,
+        3, 2, 6, 3, 6, 7,
+        0, 3, 7, 0, 7, 4,
+        1, 5, 6, 1, 6, 2,
+    ];
+    (vertices, indices)
+}
 
 
 impl State {
@@ -247,7 +281,7 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"), // 1.
-                buffers: &[Vertex::layout()], // 2.
+                buffers: &[ParticleMeshVertex::layout(), Vertex::instance_layout()], // 2.
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState { // 3.
@@ -286,16 +320,25 @@ impl State {
             multiview_mask: None, // 5.
             cache: None, // 6.
         });
-        let kernel = CubicKernel::new(1.0 / 8.0);
-        let mut spatial_hash =
-            SpatialHash3D::new((16, 16, 16), || Vec::new(), kernel.h);
-        let cube = Cube::new(5, 1.0 / 5.0, &kernel, &mut spatial_hash);
-        let (vertices, indices) = cube.to_renderable();
+        let m = 15;
+        let kernel = CubicKernel::new(5.0 / (m ) as f32);
+        let cube = Cube::new(m, 1.0 / m as f32, &kernel);
+        let particle_radius = 0.2 / m as f32;
+        let (particle_mesh, indices) = particle_cube(particle_radius);
+        let instances = cube.to_particle_renderable();
         let num_indices = indices.len() as u32;
-        let vertex_buffer = device.create_buffer_init(
+        let num_instances = instances.len() as u32;
+        let particle_mesh_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex buffer"),
-                contents: bytemuck::cast_slice(&vertices),
+                label: Some("Particle mesh buffer"),
+                contents: bytemuck::cast_slice(&particle_mesh),
+                usage: wgpu::BufferUsages::VERTEX,
+            }
+        );
+        let particle_instance_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Particle instance buffer"),
+                contents: bytemuck::cast_slice(&instances),
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             }
         );
@@ -316,9 +359,11 @@ impl State {
             is_surface_configured: false,
             window,
             render_pipeline,
-            vertex_buffer,
+            particle_mesh_buffer,
+            particle_instance_buffer,
             index_buffer,
             num_indices,
+            num_instances,
             camera,
             camera_controller: CameraController::new(),
             camera_bind_group,
@@ -326,8 +371,6 @@ impl State {
             camera_uniform,
             depth_texture,
             object: cube,
-            kernel,
-            spatial_hash,
         })
     }
 
@@ -400,16 +443,21 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            let (vertices, indices) = self.object.to_renderable();
-            self.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-            self.queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&indices));
+            let instances = self.object.to_particle_renderable();
+            self.num_instances = instances.len() as u32;
+            self.queue.write_buffer(
+                &self.particle_instance_buffer,
+                0,
+                bytemuck::cast_slice(&instances),
+            );
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(0, self.particle_mesh_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.particle_instance_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.num_instances);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -435,7 +483,7 @@ impl State {
     }
 
     fn update(&mut self) {
-        self.object.update(&mut self.spatial_hash);
+        self.object.update();
         self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_projection(&self.camera);
         self.queue.write_buffer(
