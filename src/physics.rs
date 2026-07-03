@@ -2,6 +2,11 @@ mod spatialhash;
 use crate::Vertex;
 use nalgebra::{Matrix3, Vector3};
 use std::ops::Add;
+
+const DT: f32 = 0.01;
+const VELOCITY_DAMPING: f32 = 0.995;
+const STRETCH_RATE: f32 = 0.15;
+const MAX_STRETCH: f32 = 1.05;
 #[derive(Debug, Clone)]
 #[allow(unused)]
 struct PhysicsVertex {
@@ -204,9 +209,12 @@ impl Cube {
     pub fn update(&mut self) {
         let forces = compute_forces(self, &self.kernel);
         self.current.vertices.iter_mut().zip(forces).for_each(|(v, f)| {
-            v.velocity += f * 0.01 / v.mass;
+            v.velocity += f * DT / v.mass;
+            v.velocity *= VELOCITY_DAMPING;
         });
         self.current.update();
+        let stretch_amount = (self.current.t * STRETCH_RATE).min(MAX_STRETCH);
+        apply_uniaxial_x_stretch(&self.reference, &mut self.current, stretch_amount);
     }
 
     pub fn to_renderable(&self) -> (Vec<Vertex>, Vec<u16>) {
@@ -214,7 +222,28 @@ impl Cube {
     }
 
     pub fn to_particle_renderable(&self) -> Vec<Vertex> {
-        self.current.to_particle_renderable()
+        let (min_x, max_x) = x_face_bounds(&self.reference);
+        self.current
+            .vertices
+            .iter()
+            .zip(self.reference.vertices.iter())
+            .map(|(current, reference)| {
+                let color = if (reference.position.x - min_x).abs() < 1e-6 {
+                    [0.25, 0.8, 1.0]
+                } else if (reference.position.x - max_x).abs() < 1e-6 {
+                    [1.0, 0.35, 0.35]
+                } else if current.renderable {
+                    [1.0, 0.75, 0.55]
+                } else {
+                    [0.9, 0.9, 1.0]
+                };
+
+                Vertex {
+                    position: [current.position.x, current.position.y, current.position.z],
+                    color,
+                }
+            })
+            .collect()
     }
 }
 
@@ -266,9 +295,9 @@ impl CubeShape {
     }
 
     pub fn update(&mut self) {
-        self.t += 0.01;
+        self.t += DT;
         for v in self.vertices.iter_mut() {
-            v.position += v.velocity * 0.01;
+            v.position += v.velocity * DT;
         }
     }
 
@@ -371,18 +400,33 @@ impl CubeShape {
         (vertices, indices)
     }
 
-    pub fn to_particle_renderable(&self) -> Vec<Vertex> {
-        self.vertices
-            .iter()
-            .map(|v| Vertex {
-                position: [v.position.x, v.position.y, v.position.z],
-                color: if v.renderable {
-                    [1.0, 0.4, 0.4]
-                } else {
-                    [0.85, 0.85, 1.0]
-                },
-            })
-            .collect()
+}
+
+fn x_face_bounds(shape: &CubeShape) -> (f32, f32) {
+    let min_x = shape
+        .vertices
+        .iter()
+        .map(|v| v.position.x)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = shape
+        .vertices
+        .iter()
+        .map(|v| v.position.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    (min_x, max_x)
+}
+
+fn apply_uniaxial_x_stretch(reference: &CubeShape, current: &mut CubeShape, stretch_amount: f32) {
+    let (min_x, max_x) = x_face_bounds(reference);
+
+    for (reference_vertex, current_vertex) in reference.vertices.iter().zip(current.vertices.iter_mut()) {
+        if (reference_vertex.position.x - min_x).abs() < 1e-6 {
+            current_vertex.position.x = reference_vertex.position.x;
+            current_vertex.velocity.x = 0.0;
+        } else if (reference_vertex.position.x - max_x).abs() < 1e-6 {
+            current_vertex.position.x = reference_vertex.position.x + stretch_amount;
+            current_vertex.velocity.x = 0.0;
+        }
     }
 }
 
@@ -518,31 +562,6 @@ fn stress_tensor(
     stress_tensors
 }
 
-fn external_face_force(shape: &Cube, i: usize) -> Vector3<f32> {
-    let max_x = shape
-        .reference
-        .vertices
-        .iter()
-        .map(|v| v.position.x)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let min_x = shape
-        .reference
-        .vertices
-        .iter()
-        .map(|v| v.position.x)
-        .fold(f32::INFINITY, f32::min);
-    let on_loaded_face = (shape.reference.vertices[i].position.x - max_x).abs() < 1e-6;
-    let on_min_loaded_face = (shape.reference.vertices[i].position.x - min_x).abs() < 1e-6;
-
-    if on_loaded_face {
-        Vector3::new(0.025, 0.0, 0.0)
-    } else if on_min_loaded_face {
-        Vector3::new(-0.025, 0.0, 0.0)
-    }else {
-        Vector3::zeros()
-    }
-}
-
 pub fn compute_forces(
     shape: &Cube,
     _kernel: &CubicKernel,
@@ -566,14 +585,14 @@ pub fn compute_forces(
         &shape.neighbors,
     );
     let reference_volumes = &shape.reference_volumes;
-    let k = 1.0;
-    let nu = 0.25;
+    let k = 7000.0;
+    let nu = 0.4;
     let mu = k / (2.0 * (1.0 + nu));
     let lambda = k * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
     let stress_tensors = stress_tensor(&deformations_star, mu, lambda);
     let mut forces = Vec::with_capacity(current.vertices.len());
     for i in 0..current.vertices.len() {
-        let mut force = neighbor_sum(
+        let force = neighbor_sum(
             |j| {
                 reference_volumes[i] * reference_volumes[j]
                     * (stress_tensors[i] * grad_star[i][j] - stress_tensors[j] * grad_star[j][i])
@@ -581,7 +600,6 @@ pub fn compute_forces(
             &shape.neighbors[i],
             Vector3::zeros(),
         );
-        force += external_face_force(shape, i);
         forces.push(force);
     }
     forces
@@ -656,5 +674,29 @@ mod tests {
         let neighbors = vec![1, 3, 5];
         let sum = neighbor_sum(|idx| idx, &neighbors, 0);
         assert_eq!(sum, 9);
+    }
+
+    #[test]
+    fn uniaxial_stretch_constrains_only_x_on_end_faces() {
+        let reference = CubeShape::new_static(3, 1.0);
+        let mut current = CubeShape::new(3, 1.0);
+
+        for vertex in &mut current.vertices {
+            vertex.position += Vector3::new(0.2, 0.3, 0.4);
+            vertex.velocity = Vector3::new(1.0, 2.0, 3.0);
+        }
+
+        apply_uniaxial_x_stretch(&reference, &mut current, 0.25);
+        let (min_x, max_x) = x_face_bounds(&reference);
+
+        for (reference_vertex, current_vertex) in reference.vertices.iter().zip(current.vertices.iter()) {
+            if (reference_vertex.position.x - min_x).abs() < 1e-6 {
+                assert_eq!(current_vertex.position.x, reference_vertex.position.x);
+                assert_eq!(current_vertex.velocity.x, 0.0);
+            } else if (reference_vertex.position.x - max_x).abs() < 1e-6 {
+                assert_eq!(current_vertex.position.x, reference_vertex.position.x + 0.25);
+                assert_eq!(current_vertex.velocity.x, 0.0);
+            }
+        }
     }
 }
