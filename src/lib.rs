@@ -320,8 +320,8 @@ impl State {
             multiview_mask: None, // 5.
             cache: None, // 6.
         });
-        let m = 15;
-        let kernel = CubicKernel::new(5.0 / (m ) as f32);
+        let m = 11;
+        let kernel = CubicKernel::new(1.0 / (m - 1) as f32);
         let cube = Cube::new(m, 1.0 / m as f32, &kernel);
         let particle_radius = 0.2 / m as f32;
         let (particle_mesh, indices) = particle_cube(particle_radius);

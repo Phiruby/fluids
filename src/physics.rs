@@ -67,15 +67,17 @@ impl CubicKernel {
     }
 
     fn weight(&self, r_norm: f32) -> f32 {
-        let sigma = 8.0 / (std::f32::consts::PI * self.h.powf(3.0));
         let q = r_norm / self.h;
-        let w = if (0.0..=0.5).contains(&q) {
-            6.0 * (q.powf(3.0) - q.powf(2.0) + 1.0 / 6.0)
-        } else if (0.5..=1.0).contains(&q) {
-            2.0 * (1.0 - q).powf(3.0)
-        } else {
-            0.0
-        };
+        if q >= 1.0 || q < 0.0 {
+            return 0.0;
+        }
+
+        // 3D normalization constant for Wendland C2
+        let sigma = 21.0 / (2.0 * std::f32::consts::PI * self.h.powf(3.0));
+        
+        let term = 1.0 - q;
+        let w = term.powf(4.0) * (4.0 * q + 1.0);
+        
         w * sigma
     }
 
@@ -85,30 +87,27 @@ impl CubicKernel {
             return Vector3::zeros();
         }
 
-        let sigma = 8.0 / (std::f32::consts::PI * self.h.powf(3.0));
         let q = r_norm / self.h;
-        let partial_q_partial_xi = |basis| r[basis] / (self.h.powf(2.0) * q);
-        let pqpx = Vector3::new(
-            partial_q_partial_xi(0),
-            partial_q_partial_xi(1),
-            partial_q_partial_xi(2),
-        );
+        if q >= 1.0 {
+            return Vector3::zeros();
+        }
 
-        let mut gradient = if (0.0..=0.5).contains(&q) {
-            18.0 * q.powf(2.0) * pqpx - 12.0 * q * pqpx
-        } else if (0.5..=1.0).contains(&q) {
-            -6.0 * (1.0 - q).powf(2.0) * pqpx
-        } else {
-            Vector3::zeros()
-        };
-        gradient *= sigma;
+        let sigma = 21.0 / (2.0 * std::f32::consts::PI * self.h.powf(3.0));
+
+        // dW/dq = -20 * q * (1 - q)^3
+        let dw_dq = -20.0 * q * (1.0 - q).powf(3.0);
+        
+        // dq/dx = r / (h * ||r||)
+        let dq_dx = r / (self.h * r_norm);
+
+        // Chain rule: dW/dx = dW/dq * dq/dx
+        let gradient = (dw_dq * sigma) * dq_dx;
         gradient
     }
 
-    /// Performs pairwise evaluation of caussian kernel betwen the two.
+    /// Performs pairwise evaluation of Wendland C2 kernel between the two.
     /// Index [i][j] of output is W_{ij} = W(x_i - x_j).
-    /// Cubic kernel is impl of (4) in https://arxiv.org/pdf/2009.06944
-    fn eval(
+    pub fn eval(
         &self,
         x_i: &[Vector3<f32>],
         x_j: &[Vector3<f32>],
@@ -126,7 +125,7 @@ impl CubicKernel {
 
     /// Returns gradient w.r.t x_i's of W_{ij} = W(x_i - x_j);
     /// i.e this returns Matrix so that G[i][j] = nabla_i W_{ij}
-    fn gradient(
+    pub fn gradient(
         &self,
         x_i: &[Vector3<f32>],
         x_j: &[Vector3<f32>],
@@ -158,6 +157,7 @@ pub struct Cube {
     L: Vec<Matrix3<f32>>,
     reference_gradients: Vec<Vec<Vector3<f32>>>,
     reference_volumes: Vec<f32>,
+    reference_kernel_weights: Vec<Vec<f32>>,
     pub current: CubeShape,
     kernel: CubicKernel,
 }
@@ -194,11 +194,16 @@ impl Cube {
             }
             L.push(L_i.try_inverse().unwrap());
         }
-        
+        let reference_kernel_weights = kernel.eval(
+            &reference_positions,
+            &reference_positions,
+            &neighbors,
+        );
         Self {
             reference,
             neighbors,
             reference_volumes,
+            reference_kernel_weights,
             current: CubeShape::new(n, spacing),
             L,
             reference_gradients,
@@ -562,6 +567,37 @@ fn stress_tensor(
     stress_tensors
 }
 
+fn penalty_forces(
+    reference_volumes: &[f32],
+    k: f32,
+    alpha: f32,
+    deformations: &[Matrix3<f32>],
+    reference_kernel_weights: &[Vec<f32>],
+    current_vertices: &[PhysicsVertex],
+    reference_vertices: &[PhysicsVertex],
+    neighbors: &[Vec<usize>],
+) -> Vec<Vector3<f32>> {
+    let mut forces = Vec::with_capacity(current_vertices.len());
+    for i in 0..current_vertices.len() {
+        let force = -0.5 * alpha * k * neighbor_sum(
+            |j| {
+                if j == i { return Vector3::zeros(); }
+                let x_ji_ref = reference_vertices[j].position - reference_vertices[i].position;
+                let x_ji = current_vertices[j].position - current_vertices[i].position;
+                let e_ji = deformations[i] * x_ji_ref - x_ji;
+                let e_ij = x_ji - deformations[j] * x_ji_ref;
+                reference_volumes[i] * reference_volumes[j] * (reference_kernel_weights[i][j] / x_ji_ref.norm_squared()) 
+                    * (e_ji.dot(&x_ji) / x_ji.norm() - e_ij.dot(&x_ji_ref) / x_ji_ref.norm()) * x_ji / x_ji.norm()
+                    
+            },
+            &neighbors[i],
+            Vector3::zeros(),
+        );
+        forces.push(force);
+    }
+    forces
+}
+
 pub fn compute_forces(
     shape: &Cube,
     _kernel: &CubicKernel,
@@ -586,7 +622,7 @@ pub fn compute_forces(
     );
     let reference_volumes = &shape.reference_volumes;
     let k = 7000.0;
-    let nu = 0.4;
+    let nu = 0.0;
     let mu = k / (2.0 * (1.0 + nu));
     let lambda = k * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
     let stress_tensors = stress_tensor(&deformations_star, mu, lambda);
@@ -602,6 +638,19 @@ pub fn compute_forces(
         );
         forces.push(force);
     }
+    let penalty_forces = penalty_forces(
+        &shape.reference_volumes,
+        k,
+        0.9, // alpha: what to choose?
+        &initial_deformations,
+        &shape.reference_kernel_weights,
+        &current.vertices,
+        &shape.reference.vertices,
+        &shape.neighbors,
+    );
+    forces.iter_mut().zip(penalty_forces.iter()).for_each(|(f, pf)| {
+        *f += pf;
+    });
     forces
 }
 
