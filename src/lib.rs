@@ -14,7 +14,7 @@ use winit::{
 use crate::texture::Texture;
 use crate::physics::{Cube, CubicKernel};
 use crate::camera::CameraController;
-use crate::graphics::{RenderPipeline, RayPipeline};
+use crate::graphics::{MeshRenderPipeline, RenderPipeline, RayPipeline};
 use cgmath::SquareMatrix;
 
 #[cfg(target_arch = "wasm32")]
@@ -23,6 +23,14 @@ use wasm_bindgen::prelude::*;
 use winit::platform::web::EventLoopExtWebSys;
 use bytemuck;
 use cgmath;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenderMode {
+    Particles,
+    Mesh,
+}
+
+const RENDER_MODE: RenderMode = RenderMode::Mesh;
 
 struct Ray {
     start: cgmath::Point3<f32>,
@@ -109,6 +117,7 @@ pub struct State {
     is_surface_configured: bool,
     window: Arc<Window>,
     render_pipeline: RenderPipeline,
+    mesh_pipeline: MeshRenderPipeline,
     ray_pipeline: RayPipeline,
     camera: Camera,
     camera_controller: CameraController,
@@ -149,6 +158,25 @@ pub(crate) struct Vertex {
 }
 
 impl Vertex {
+    pub(crate) fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
+        }
+    }
+
     pub(crate) fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -280,6 +308,14 @@ impl State {
             0.2 / m as f32,
             &instances,
         );
+        let (mesh_vertices, mesh_indices) = cube.to_renderable();
+        let mesh_pipeline = MeshRenderPipeline::new(
+            &device,
+            &camera_bind_group_layout,
+            config.format,
+            &mesh_vertices,
+            &mesh_indices,
+        );
         let ray_pipeline = RayPipeline::new(&device, &camera_bind_group_layout, config.format);
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
 
@@ -291,6 +327,7 @@ impl State {
             is_surface_configured: false,
             window,
             render_pipeline,
+            mesh_pipeline,
             ray_pipeline,
             camera,
             camera_controller: CameraController::new(),
@@ -373,7 +410,10 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            self.render_pipeline.draw(&mut render_pass, &self.camera_bind_group);
+            match RENDER_MODE {
+                RenderMode::Particles => self.render_pipeline.draw(&mut render_pass, &self.camera_bind_group),
+                RenderMode::Mesh => self.mesh_pipeline.draw(&mut render_pass, &self.camera_bind_group),
+            }
             self.ray_pipeline.draw(&mut render_pass, &self.camera_bind_group);
         }
 
@@ -416,10 +456,16 @@ impl State {
             self.config.height as f32,
         );
         self.ray_pipeline.update(&self.queue, ray.start, ray.end, [0.2, 1.0, 0.2]);
-        self.render_pipeline.update(
-            &self.queue,
-            &self.object.to_particle_renderable(),
-        );
+        match RENDER_MODE {
+            RenderMode::Particles => self.render_pipeline.update(
+                &self.queue,
+                &self.object.to_particle_renderable(),
+            ),
+            RenderMode::Mesh => {
+                let (vertices, _) = self.object.to_renderable();
+                self.mesh_pipeline.update(&self.queue, &vertices);
+            }
+        }
     }
 }
 

@@ -70,14 +70,6 @@ fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
     (vertices, indices)
 }
 
-fn color_target(format: wgpu::TextureFormat) -> wgpu::ColorTargetState {
-    wgpu::ColorTargetState {
-        format,
-        blend: Some(wgpu::BlendState::REPLACE),
-        write_mask: wgpu::ColorWrites::ALL,
-    }
-}
-
 pub struct RenderPipeline {
     pipeline: PipelineState,
     mesh_buffer: wgpu::Buffer,
@@ -105,7 +97,11 @@ impl RenderPipeline {
                 primitive_topology: wgpu::PrimitiveTopology::TriangleList,
                 global_bind_group_layout,
                 vertex_buffers: &[ParticleMeshVertex::layout(), Vertex::instance_layout()],
-                fragment_targets: &[Some(color_target(surface_format))],
+                fragment_targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
             },
@@ -150,6 +146,70 @@ impl RenderPipeline {
     }
 }
 
+pub struct MeshRenderPipeline {
+    pipeline: PipelineState,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
+}
+
+impl MeshRenderPipeline {
+    pub fn new(
+        device: &wgpu::Device,
+        global_bind_group_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+        vertices: &[Vertex],
+        indices: &[u16],
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
+        let pipeline = create_pipeline(
+            device,
+            &PipelineInfo {
+                shader: &shader,
+                vertex_entry_point: "vs_mesh_main",
+                fragment_entry_point: "fs_main",
+                primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+                global_bind_group_layout,
+                vertex_buffers: &[Vertex::layout()],
+                fragment_targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+            },
+        );
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Mesh vertex buffer"),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Mesh index buffer"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Self {
+            pipeline,
+            vertex_buffer,
+            index_buffer,
+            num_indices: indices.len() as u32,
+        }
+    }
+
+    pub fn update(&mut self, queue: &wgpu::Queue, vertices: &[Vertex]) {
+        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+    }
+
+    pub fn draw(&self, render_pass: &mut wgpu::RenderPass, global_bind_group: &wgpu::BindGroup) {
+        self.pipeline.bind(render_pass, global_bind_group);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+    }
+}
+
 pub struct RayPipeline {
     pipeline: PipelineState,
     vertex_buffer: wgpu::Buffer,
@@ -171,7 +231,11 @@ impl RayPipeline {
                 primitive_topology: wgpu::PrimitiveTopology::LineList,
                 global_bind_group_layout,
                 vertex_buffers: &[LineVertex::layout()],
-                fragment_targets: &[Some(color_target(surface_format))],
+                fragment_targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::LessEqual,
             },
