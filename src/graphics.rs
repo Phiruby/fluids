@@ -1,5 +1,9 @@
 use wgpu;
 use crate::texture::Texture;
+
+mod pipelines;
+pub use pipelines::{RenderPipeline, RayPipeline};
+
 pub(in crate::graphics) struct PipelineInfo<'a> {
     shader: &'a wgpu::ShaderModule,
     vertex_entry_point: &'a str,
@@ -8,6 +12,8 @@ pub(in crate::graphics) struct PipelineInfo<'a> {
     global_bind_group_layout: &'a wgpu::BindGroupLayout,
     vertex_buffers: &'a [wgpu::VertexBufferLayout<'a>],
     fragment_targets: &'a [Option<wgpu::ColorTargetState>],
+    depth_write_enabled: bool,
+    depth_compare: wgpu::CompareFunction,
 }
 
 pub(in crate::graphics) struct PipelineState {
@@ -15,17 +21,13 @@ pub(in crate::graphics) struct PipelineState {
 }
 
 impl PipelineState {
-    pub(in crate::graphics) fn update(
-        &self, 
+    pub(in crate::graphics) fn bind(
+        &self,
         render_pass: &mut wgpu::RenderPass,
         global_bind_group: &wgpu::BindGroup,
     ) {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, global_bind_group, &[]);
-        self.vertex_buffers.iter().enumerate().for_each(|(i, buffer)| {
-            render_pass.set_vertex_buffer(i, buffer.slice(..));
-        });
-        
     }
 }
 
@@ -65,8 +67,8 @@ pub(in crate::graphics) fn create_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: Texture::DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_write_enabled: Some(pipeline_info.depth_write_enabled),
+            depth_compare: Some(pipeline_info.depth_compare),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

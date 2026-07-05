@@ -14,6 +14,7 @@ use winit::{
 use crate::texture::Texture;
 use crate::physics::{Cube, CubicKernel};
 use crate::camera::CameraController;
+use crate::graphics::{RenderPipeline, RayPipeline};
 use cgmath::SquareMatrix;
 
 #[cfg(target_arch = "wasm32")]
@@ -26,21 +27,6 @@ use cgmath;
 struct Ray {
     start: cgmath::Point3<f32>,
     end: cgmath::Point3<f32>,
-}
-
-impl Ray {
-    fn to_line_vertices(&self, color: [f32; 3]) -> [LineVertex; 2] {
-        [
-            LineVertex {
-                position: self.start.into(),
-                color,
-            },
-            LineVertex {
-                position: self.end.into(),
-                color,
-            },
-        ]
-    }
 }
 
 #[rustfmt::skip]
@@ -122,14 +108,8 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
     window: Arc<Window>,
-    render_pipeline: wgpu::RenderPipeline,
-    ray_pipeline: wgpu::RenderPipeline,
-    ray_buffer: wgpu::Buffer,
-    particle_mesh_buffer: wgpu::Buffer,
-    particle_instance_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    num_indices: u32,
-    num_instances: u32,
+    render_pipeline: RenderPipeline,
+    ray_pipeline: RayPipeline,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -169,7 +149,7 @@ pub(crate) struct Vertex {
 }
 
 impl Vertex {
-    fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    pub(crate) fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -188,77 +168,6 @@ impl Vertex {
         }
     }
 }
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct LineVertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
-
-impl LineVertex {
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<LineVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct ParticleMeshVertex {
-    position: [f32; 3],
-}
-
-impl ParticleMeshVertex {
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<ParticleMeshVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            }],
-        }
-    }
-}
-
-fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
-    let vertices = [
-        ParticleMeshVertex { position: [-radius, -radius, -radius] },
-        ParticleMeshVertex { position: [ radius, -radius, -radius] },
-        ParticleMeshVertex { position: [ radius,  radius, -radius] },
-        ParticleMeshVertex { position: [-radius,  radius, -radius] },
-        ParticleMeshVertex { position: [-radius, -radius,  radius] },
-        ParticleMeshVertex { position: [ radius, -radius,  radius] },
-        ParticleMeshVertex { position: [ radius,  radius,  radius] },
-        ParticleMeshVertex { position: [-radius,  radius,  radius] },
-    ];
-    let indices = [
-        0, 1, 2, 0, 2, 3,
-        4, 6, 5, 4, 7, 6,
-        0, 4, 5, 0, 5, 1,
-        3, 2, 6, 3, 6, 7,
-        0, 3, 7, 0, 7, 4,
-        1, 5, 6, 1, 6, 2,
-    ];
-    (vertices, indices)
-}
-
 
 impl State {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
@@ -315,8 +224,6 @@ impl State {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
-
         let camera = Camera {
             eye: (0.0, 1.0, 4.0).into(),
             target: (0.0, 0.0, 0.0).into(),
@@ -362,154 +269,18 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[
-                Some(&camera_bind_group_layout),
-            ],
-            immediate_size: 0,
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"), // 1.
-                buffers: &[ParticleMeshVertex::layout(), Vertex::instance_layout()], // 2.
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState { // 3.
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState { // 4.
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw, // 2.
-                cull_mode: None,
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Texture::DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }), // 1.
-            multisample: wgpu::MultisampleState {
-                count: 1, // 2.
-                mask: !0, // 3.
-                alpha_to_coverage_enabled: false, // 4.
-            },
-            multiview_mask: None, // 5.
-            cache: None, // 6.
-        });
-
-
-        let ray_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Ray Pipeline Layout"),
-            bind_group_layouts: &[
-                Some(&camera_bind_group_layout),
-            ],
-            immediate_size: 0,
-        });
-        let ray_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Ray Pipeline"),
-            layout: Some(&ray_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_line_main"),
-                buffers: &[LineVertex::layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Texture::DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
         let m = 11;
         let kernel = CubicKernel::new(1.0 / (m - 1) as f32);
         let cube = Cube::new(m, 1.0 / m as f32, &kernel);
-        let particle_radius = 0.2 / m as f32;
-        let (particle_mesh, indices) = particle_cube(particle_radius);
         let instances = cube.to_particle_renderable();
-        let num_indices = indices.len() as u32;
-        let num_instances = instances.len() as u32;
-        let particle_mesh_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Particle mesh buffer"),
-                contents: bytemuck::cast_slice(&particle_mesh),
-                usage: wgpu::BufferUsages::VERTEX,
-            }
+        let render_pipeline = RenderPipeline::new(
+            &device,
+            &camera_bind_group_layout,
+            config.format,
+            0.2 / m as f32,
+            &instances,
         );
-        let particle_instance_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Particle instance buffer"),
-                contents: bytemuck::cast_slice(&instances),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            }
-        );
-        let index_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Index buffer"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            }
-        );
-        let ray_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Ray buffer"),
-            contents: bytemuck::cast_slice(&[
-                LineVertex {
-                    position: [0.0, 0.0, 0.0],
-                    color: [0.2, 1.0, 0.2],
-                },
-                LineVertex {
-                    position: [0.0, 0.0, 10.0],
-                    color: [0.2, 1.0, 0.2],
-                },
-            ]),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
+        let ray_pipeline = RayPipeline::new(&device, &camera_bind_group_layout, config.format);
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
 
         Ok(Self { 
@@ -521,12 +292,6 @@ impl State {
             window,
             render_pipeline,
             ray_pipeline,
-            ray_buffer,
-            particle_mesh_buffer,
-            particle_instance_buffer,
-            index_buffer,
-            num_indices,
-            num_instances,
             camera,
             camera_controller: CameraController::new(),
             camera_bind_group,
@@ -547,17 +312,6 @@ impl State {
             self.is_surface_configured = true;
             self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "Depth texture");
         }
-    }
-
-    fn update_ray_buffer(&mut self) {
-        let ray = self.mouse_state.world_ray(
-            &self.camera,
-            self.config.width as f32,
-            self.config.height as f32,
-        );
-        let ray_vertices = ray.to_line_vertices([0.2, 1.0, 0.2]);
-        self.queue
-            .write_buffer(&self.ray_buffer, 0, bytemuck::cast_slice(&ray_vertices));
     }
 
     pub fn render(&mut self) -> anyhow::Result<()> {
@@ -619,26 +373,8 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            let instances = self.object.to_particle_renderable();
-            self.num_instances = instances.len() as u32;
-            self.queue.write_buffer(
-                &self.particle_instance_buffer,
-                0,
-                bytemuck::cast_slice(&instances),
-            );
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-
-            render_pass.set_vertex_buffer(0, self.particle_mesh_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.particle_instance_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.num_instances);
-
-            render_pass.set_pipeline(&self.ray_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.ray_buffer.slice(..));
-            render_pass.draw(0..2, 0..1);
+            self.render_pipeline.draw(&mut render_pass, &self.camera_bind_group);
+            self.ray_pipeline.draw(&mut render_pass, &self.camera_bind_group);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -674,7 +410,16 @@ impl State {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
-        self.update_ray_buffer();
+        let ray = self.mouse_state.world_ray(
+            &self.camera,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+        self.ray_pipeline.update(&self.queue, ray.start, ray.end, [0.2, 1.0, 0.2]);
+        self.render_pipeline.update(
+            &self.queue,
+            &self.object.to_particle_renderable(),
+        );
     }
 }
 
