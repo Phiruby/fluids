@@ -177,6 +177,10 @@ impl Vertex {
         }
     }
 
+    pub(crate) fn set_color(&mut self, color: [f32; 3]) {
+        self.color = color;
+    }
+
     pub(crate) fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -456,13 +460,17 @@ impl State {
             self.config.height as f32,
         );
         self.ray_pipeline.update(&self.queue, ray.start, ray.end, [0.2, 1.0, 0.2]);
+        let hovered_face = self.object.hovered_face_from_ray(
+            (ray.start.x, ray.start.y, ray.start.z),
+            (ray.end.x, ray.end.y, ray.end.z),
+        );
         match RENDER_MODE {
             RenderMode::Particles => self.render_pipeline.update(
                 &self.queue,
                 &self.object.to_particle_renderable(),
             ),
             RenderMode::Mesh => {
-                let (vertices, _) = self.object.to_renderable();
+                let (vertices, _) = self.object.to_renderable_with_hover(hovered_face);
                 self.mesh_pipeline.update(&self.queue, &vertices);
             }
         }

@@ -19,7 +19,7 @@ wgpu = "29.0"
 pollster = "0.3"
 bytemuck = { version = "1.25.0", features = [ "derive" ] }
 cgmath = "0.18.0"
-nalgebra = "0.35.0"
+nalgebra = "0.34.0"
 # NOTE: check https://crates.io/crates/ndarray-linalg for backends you can use in your system
 ndarray-linalg = { version = "0.18.1", features = ["intel-mkl-system"] }
 spatial_hash_3d = "0.1.6"

@@ -1,7 +1,12 @@
 mod spatialhash;
 use crate::Vertex;
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::{Matrix3, Point3, Vector3};
+use std::collections::HashSet;
 use std::ops::Add;
+use bvh::aabb::{Aabb, Bounded};
+use bvh::bounding_hierarchy::{BHShape, BoundingHierarchy};
+use bvh::bvh::Bvh;
+use bvh::ray::Ray as BvhRay;
 
 const DT: f32 = 0.01;
 const VELOCITY_DAMPING: f32 = 0.995;
@@ -142,6 +147,143 @@ impl CubicKernel {
     }
 }
 
+
+/// Represents a face of a cube
+#[derive(Debug, Clone)]
+pub struct CubeFace {
+    pub face_index: usize,
+    pub center: Point3<f32>,
+    pub width: f32,
+    pub height: f32,
+    pub depth: f32,
+    pub node_index: usize,
+    pub vertex_indices: Vec<usize>,
+}
+
+impl Bounded<f32, 3> for CubeFace {
+    fn aabb(&self) -> Aabb<f32, 3> {
+        let half = nalgebra::Vector3::new(self.width / 2.0, self.height / 2.0, self.depth / 2.0);
+        let min = self.center - half;
+        let max = self.center + half;
+        Aabb::with_bounds(min, max)
+    }
+}
+
+impl BHShape<f32, 3> for CubeFace {
+    fn set_bh_node_index(&mut self, index: usize) {
+        self.node_index = index;
+    }
+
+    fn bh_node_index(&self) -> usize {
+        self.node_index
+    }
+}
+
+fn grid_index(n: usize, i: usize, j: usize, k: usize) -> usize {
+    i * n * n + j * n + k
+}
+
+fn build_face(
+    n: usize,
+    layer: usize,
+    axis: usize,
+    face_index: usize,
+    vertices: &[PhysicsVertex],
+) -> CubeFace {
+    let mut vertex_indices = Vec::with_capacity(n * n);
+    let mut pos_sum = Vector3::zeros();
+    let mut min = Vector3::repeat(f32::INFINITY);
+    let mut max = Vector3::repeat(f32::NEG_INFINITY);
+    for a in 0..n {
+        for b in 0..n {
+            let idx = match axis {
+                0 => grid_index(n, layer, a, b),
+                1 => grid_index(n, a, layer, b),
+                _ => grid_index(n, a, b, layer),
+            };
+            vertex_indices.push(idx);
+            let p = vertices[idx].position;
+            pos_sum += p;
+            min = min.inf(&p);
+            max = max.sup(&p);
+        }
+    }
+    let extent = max - min;
+    let eps = 1e-4;
+    CubeFace {
+        face_index,
+        center: Point3::from(pos_sum / (n * n) as f32),
+        width: extent.x.max(eps),
+        height: extent.y.max(eps),
+        depth: extent.z.max(eps),
+        node_index: 0,
+        vertex_indices,
+    }
+}
+
+fn build_cube_faces(vertices: &[PhysicsVertex], n: usize) -> [CubeFace; 6] {
+    [
+        build_face(n, 0, 0, 0, vertices),
+        build_face(n, 0, 1, 1, vertices),
+        build_face(n, 0, 2, 2, vertices),
+        build_face(n, n - 1, 0, 3, vertices),
+        build_face(n, n - 1, 1, 4, vertices),
+        build_face(n, n - 1, 2, 5, vertices),
+    ]
+}
+
+fn update_cube_faces(faces: &mut [CubeFace; 6], vertices: &[PhysicsVertex]) {
+    for face in faces.iter_mut() {
+        let mut pos_sum = Vector3::zeros();
+        let mut min = Vector3::repeat(f32::INFINITY);
+        let mut max = Vector3::repeat(f32::NEG_INFINITY);
+        for &idx in &face.vertex_indices {
+            let p = vertices[idx].position;
+            pos_sum += p;
+            min = min.inf(&p);
+            max = max.sup(&p);
+        }
+        let count = face.vertex_indices.len() as f32;
+        face.center = Point3::from(pos_sum / count);
+        let extent = max - min;
+        let eps = 1e-4;
+        face.width = extent.x.max(eps);
+        face.height = extent.y.max(eps);
+        face.depth = extent.z.max(eps);
+    }
+}
+
+fn vec_component(v: Vector3<f32>, axis: usize) -> f32 {
+    match axis {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    }
+}
+
+fn ray_intersect_face(
+    origin: Point3<f32>,
+    dir: Vector3<f32>,
+    face: &CubeFace,
+    vertices: &[PhysicsVertex],
+) -> Option<f32> {
+    let axis = match face.face_index {
+        0 | 3 => 0,
+        1 | 4 => 1,
+        _ => 2,
+    };
+    let coord = vec_component(face.center.coords, axis);
+    let denom = vec_component(dir, axis);
+    if denom.abs() < 1e-6 {
+        return None;
+    }
+    let t = (coord - vec_component(origin.coords, axis)) / denom;
+    if t <= 0.0 {
+        return None;
+    }
+    // TODO: bound check per face?
+    Some(t)
+}
 #[derive(Debug)]
 struct CubeShape {
     pub vertices: Vec<PhysicsVertex>,
@@ -149,7 +291,6 @@ struct CubeShape {
     t: f32,
 }
 
-/// reference_gradients: [i][j] = nabla_i W_{ij}
 #[derive(Debug)]
 pub struct Cube {
     reference: CubeShape,
@@ -159,6 +300,8 @@ pub struct Cube {
     reference_volumes: Vec<f32>,
     reference_kernel_weights: Vec<Vec<f32>>,
     pub current: CubeShape,
+    pub cube_faces: [CubeFace; 6],
+    face_bvh: Bvh<f32, 3>,
     kernel: CubicKernel,
 }
 
@@ -184,6 +327,8 @@ impl Cube {
             &reference_positions,
             &neighbors,
         );
+        let mut cube_faces = build_cube_faces(&reference.vertices, n);
+        let face_bvh = Bvh::build(&mut cube_faces);
         let reference_distances = pairwise_displacement(&reference.vertices, &reference.vertices);
         let mut L = Vec::with_capacity(reference.vertices.len());
         for i in 0..reference.vertices.len() {
@@ -208,6 +353,8 @@ impl Cube {
             L,
             reference_gradients,
             kernel: kernel.clone(),
+            cube_faces,
+            face_bvh,
         }
     }
 
@@ -220,10 +367,49 @@ impl Cube {
         self.current.update();
         let stretch_amount = (self.current.t * STRETCH_RATE).min(MAX_STRETCH);
         apply_uniaxial_x_stretch(&self.reference, &mut self.current, stretch_amount);
+        update_cube_faces(&mut self.cube_faces, &self.current.vertices);
+        // TODO: do we have to rebuild every frame? 
+        self.face_bvh = Bvh::build(&mut self.cube_faces);
+    }
+
+    pub fn hovered_face_from_ray(
+        &self,
+        start: (f32, f32, f32),
+        end: (f32, f32, f32),
+    ) -> Option<usize> {
+        let origin = Point3::new(start.0, start.1, start.2);
+        let direction = Vector3::new(end.0 - start.0, end.1 - start.1, end.2 - start.2);
+        self.hovered_face(origin, direction)
+    }
+
+    fn hovered_face(&self, origin: Point3<f32>, direction: Vector3<f32>) -> Option<usize> {
+        let len = direction.norm();
+        if len < 1e-6 {
+            return None;
+        }
+        let dir = direction / len;
+        let ray = BvhRay::new(origin, dir);
+        let mut best: Option<(usize, f32)> = None;
+        for face in self.face_bvh.traverse(&ray, &self.cube_faces) {
+            if let Some(t) = ray_intersect_face(origin, dir, face, &self.current.vertices) {
+                if best.map_or(true, |(_, bt)| t < bt) {
+                    best = Some((face.face_index, t));
+                }
+            }
+        }
+        Some(best?.0)
     }
 
     pub fn to_renderable(&self) -> (Vec<Vertex>, Vec<u16>) {
-        self.current.to_renderable()
+        self.to_renderable_with_hover(None)
+    }
+
+    pub fn to_renderable_with_hover(&self, hovered_face: Option<usize>) -> (Vec<Vertex>, Vec<u16>) {
+        let highlight: HashSet<_> = hovered_face
+            // TODO: copying ~ n^2 indicies
+            .map(|f| self.cube_faces[f].vertex_indices.iter().copied().collect())
+            .unwrap_or_default();
+        self.current.to_renderable_with_highlight(&highlight)
     }
 
     pub fn to_particle_renderable(&self) -> Vec<Vertex> {
@@ -316,13 +502,21 @@ impl CubeShape {
     }
 
     pub fn to_renderable(&self) -> (Vec<Vertex>, Vec<u16>) {
+        self.to_renderable_with_highlight(&HashSet::new())
+    }
+
+    fn to_renderable_with_highlight(&self, highlight: &HashSet<usize>) -> (Vec<Vertex>, Vec<u16>) {
         let n = self.n;
         let mut render_map = vec![None; self.vertices.len()];
         let mut vertices = Vec::new();
         for (grid_idx, v) in self.vertices.iter().enumerate() {
             if v.renderable {
                 render_map[grid_idx] = Some(vertices.len() as u16);
-                vertices.push(v.clone().into());
+                let mut vertex: Vertex = v.clone().into();
+                if highlight.contains(&grid_idx) {
+                    vertex.set_color([1.0, 0.85, 0.15]);
+                }
+                vertices.push(vertex);
             }
         }
         let idx = |i: usize, j: usize, k: usize| render_map[self.grid_index(i, j, k)].unwrap();
