@@ -1,7 +1,7 @@
 mod texture;
 mod physics;
 mod camera;
-
+mod graphics;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -14,6 +14,7 @@ use winit::{
 use crate::texture::Texture;
 use crate::physics::{Cube, CubicKernel};
 use crate::camera::CameraController;
+use cgmath::SquareMatrix;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -22,6 +23,26 @@ use winit::platform::web::EventLoopExtWebSys;
 use bytemuck;
 use cgmath;
 
+struct Ray {
+    start: cgmath::Point3<f32>,
+    end: cgmath::Point3<f32>,
+}
+
+impl Ray {
+    fn to_line_vertices(&self, color: [f32; 3]) -> [LineVertex; 2] {
+        [
+            LineVertex {
+                position: self.start.into(),
+                color,
+            },
+            LineVertex {
+                position: self.end.into(),
+                color,
+            },
+        ]
+    }
+}
+
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
     cgmath::Vector4::new(1.0, 0.0, 0.0, 0.0),
@@ -29,6 +50,49 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_co
     cgmath::Vector4::new(0.0, 0.0, 0.5, 0.0),
     cgmath::Vector4::new(0.0, 0.0, 0.5, 1.0),
 );
+
+struct MouseState {
+    position: winit::dpi::PhysicalPosition<f64>,
+    is_pressed: bool,
+}
+impl MouseState {
+    fn new() -> Self {
+        Self {
+            position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
+            is_pressed: false,
+        }
+    }
+    fn process_mouse_button(&mut self, button: MouseButton, state: ElementState) {
+        if button == MouseButton::Left && state == ElementState::Pressed {
+            self.is_pressed = true;
+        } else if button == MouseButton::Left && state == ElementState::Released {
+            self.is_pressed = false;
+        }
+    }
+    fn process_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
+        self.position = position;
+    }
+    fn world_ray(&self, camera: &Camera, viewport_width: f32, viewport_height: f32) -> Ray {
+        let viewport_width = viewport_width.max(1.0);
+        let viewport_height = viewport_height.max(1.0);
+        let ndc_x = (self.position.x as f32 / viewport_width) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (self.position.y as f32 / viewport_height) * 2.0;
+        let inverse_view_projection = camera
+            .build_view_projection_matrix()
+            .invert()
+            .expect("camera view projection matrix must be invertible");
+        let near_clip = cgmath::Vector4::new(ndc_x, ndc_y, 0.0, 1.0);
+        let far_clip = cgmath::Vector4::new(ndc_x, ndc_y, 1.0, 1.0);
+        let near_world = inverse_view_projection * near_clip;
+        let far_world = inverse_view_projection * far_clip;
+        let near_world = near_world.truncate() / near_world.w;
+        let far_world = far_world.truncate() / far_world.w;
+        Ray {
+            start: cgmath::Point3::new(near_world.x, near_world.y, near_world.z),
+            end: cgmath::Point3::new(far_world.x, far_world.y, far_world.z),
+        }
+    }
+}
 
 pub(crate) struct Camera {
     eye: cgmath::Point3<f32>,
@@ -59,6 +123,8 @@ pub struct State {
     is_surface_configured: bool,
     window: Arc<Window>,
     render_pipeline: wgpu::RenderPipeline,
+    ray_pipeline: wgpu::RenderPipeline,
+    ray_buffer: wgpu::Buffer,
     particle_mesh_buffer: wgpu::Buffer,
     particle_instance_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -74,6 +140,7 @@ pub struct State {
     depth_texture: Texture,
     #[allow(unused)]
     object: Cube,
+    mouse_state: MouseState,
 }
 
 #[repr(C)]
@@ -115,6 +182,34 @@ impl Vertex {
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct LineVertex {
+    position: [f32; 3],
+    color: [f32; 3],
+}
+
+impl LineVertex {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<LineVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
             ],
@@ -320,6 +415,58 @@ impl State {
             multiview_mask: None, // 5.
             cache: None, // 6.
         });
+
+
+        let ray_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Ray Pipeline Layout"),
+            bind_group_layouts: &[
+                Some(&camera_bind_group_layout),
+            ],
+            immediate_size: 0,
+        });
+        let ray_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Ray Pipeline"),
+            layout: Some(&ray_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_line_main"),
+                buffers: &[LineVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
         let m = 11;
         let kernel = CubicKernel::new(1.0 / (m - 1) as f32);
         let cube = Cube::new(m, 1.0 / m as f32, &kernel);
@@ -349,6 +496,20 @@ impl State {
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             }
         );
+        let ray_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Ray buffer"),
+            contents: bytemuck::cast_slice(&[
+                LineVertex {
+                    position: [0.0, 0.0, 0.0],
+                    color: [0.2, 1.0, 0.2],
+                },
+                LineVertex {
+                    position: [0.0, 0.0, 10.0],
+                    color: [0.2, 1.0, 0.2],
+                },
+            ]),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
 
         Ok(Self { 
@@ -359,6 +520,8 @@ impl State {
             is_surface_configured: false,
             window,
             render_pipeline,
+            ray_pipeline,
+            ray_buffer,
             particle_mesh_buffer,
             particle_instance_buffer,
             index_buffer,
@@ -371,6 +534,7 @@ impl State {
             camera_uniform,
             depth_texture,
             object: cube,
+            mouse_state: MouseState::new(),
         })
     }
 
@@ -378,10 +542,22 @@ impl State {
         if width > 0 && height > 0 {
             self.config.width = width;
             self.config.height = height;
+            self.camera.aspect = width as f32 / height as f32;
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
             self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "Depth texture");
         }
+    }
+
+    fn update_ray_buffer(&mut self) {
+        let ray = self.mouse_state.world_ray(
+            &self.camera,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+        let ray_vertices = ray.to_line_vertices([0.2, 1.0, 0.2]);
+        self.queue
+            .write_buffer(&self.ray_buffer, 0, bytemuck::cast_slice(&ray_vertices));
     }
 
     pub fn render(&mut self) -> anyhow::Result<()> {
@@ -458,6 +634,11 @@ impl State {
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
             render_pass.draw_indexed(0..self.num_indices, 0, 0..self.num_instances);
+
+            render_pass.set_pipeline(&self.ray_pipeline);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.ray_buffer.slice(..));
+            render_pass.draw(0..2, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -475,11 +656,13 @@ impl State {
 
     fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
         self.camera_controller.process_mouse_button(button, state);
+        self.mouse_state.process_mouse_button(button, state);
     }
 
     fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
         self.camera_controller
             .process_cursor_moved(position, &mut self.camera);
+        self.mouse_state.process_cursor_moved(position);
     }
 
     fn update(&mut self) {
@@ -491,6 +674,7 @@ impl State {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+        self.update_ray_buffer();
     }
 }
 

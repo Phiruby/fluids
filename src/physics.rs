@@ -622,7 +622,7 @@ pub fn compute_forces(
     );
     let reference_volumes = &shape.reference_volumes;
     let k = 7000.0;
-    let nu = 0.0;
+    let nu = 0.35;
     let mu = k / (2.0 * (1.0 + nu));
     let lambda = k * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
     let stress_tensors = stress_tensor(&deformations_star, mu, lambda);
