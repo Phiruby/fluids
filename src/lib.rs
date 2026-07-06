@@ -32,7 +32,7 @@ enum RenderMode {
 
 const RENDER_MODE: RenderMode = RenderMode::Mesh;
 
-struct Ray {
+pub(crate) struct Ray {
     start: cgmath::Point3<f32>,
     end: cgmath::Point3<f32>,
 }
@@ -45,9 +45,9 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_co
     cgmath::Vector4::new(0.0, 0.0, 0.5, 1.0),
 );
 
-struct MouseState {
+pub(crate) struct MouseState {
     position: winit::dpi::PhysicalPosition<f64>,
-    is_pressed: bool,
+    pub is_pressed: bool,
 }
 impl MouseState {
     fn new() -> Self {
@@ -446,7 +446,6 @@ impl State {
     }
 
     fn update(&mut self) {
-        self.object.update();
         self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_projection(&self.camera);
         self.queue.write_buffer(
@@ -464,6 +463,7 @@ impl State {
             (ray.start.x, ray.start.y, ray.start.z),
             (ray.end.x, ray.end.y, ray.end.z),
         );
+        self.object.update(&self.mouse_state, hovered_face.clone(), &ray);
         match RENDER_MODE {
             RenderMode::Particles => self.render_pipeline.update(
                 &self.queue,

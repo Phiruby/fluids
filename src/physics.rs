@@ -7,7 +7,7 @@ use bvh::aabb::{Aabb, Bounded};
 use bvh::bounding_hierarchy::{BHShape, BoundingHierarchy};
 use bvh::bvh::Bvh;
 use bvh::ray::Ray as BvhRay;
-
+use crate::{MouseState, Ray};
 const DT: f32 = 0.01;
 const VELOCITY_DAMPING: f32 = 0.995;
 const STRETCH_RATE: f32 = 0.15;
@@ -221,6 +221,18 @@ fn build_face(
     }
 }
 
+fn cubeface_component(position: Vector3<f32>, face_index: usize) -> f32 {
+    match face_index {
+        0 => position.x,
+        1 => position.y,
+        2 => position.z,
+        3 => position.x,
+        4 => position.y,
+        5 => position.z,
+        _ => panic!("invalid face index"),
+    }
+}
+
 fn build_cube_faces(vertices: &[PhysicsVertex], n: usize) -> [CubeFace; 6] {
     [
         build_face(n, 0, 0, 0, vertices),
@@ -358,15 +370,34 @@ impl Cube {
         }
     }
 
-    pub fn update(&mut self) {
+    pub fn update(&mut self, mouse_state: &MouseState, hovered_face: Option<usize>, ray: &Ray) {
         let forces = compute_forces(self, &self.kernel);
         self.current.vertices.iter_mut().zip(forces).for_each(|(v, f)| {
             v.velocity += f * DT / v.mass;
             v.velocity *= VELOCITY_DAMPING;
         });
         self.current.update();
-        let stretch_amount = (self.current.t * STRETCH_RATE).min(MAX_STRETCH);
-        apply_uniaxial_x_stretch(&self.reference, &mut self.current, stretch_amount);
+        if let Some(hovered_face) = hovered_face {
+            let component = |v: Point3<f32>| cubeface_component(Vector3::new(v.x, v.y, v.z), hovered_face);
+            dbg!(hovered_face);
+            // compute stretch amount based on end of ray and reference face position
+            let face = &self.cube_faces[hovered_face];
+            let face_center = face.center;
+            let ray_end = Point3::new(ray.end.x, ray.end.y, ray.end.z);
+            // project ray to relevant face normal
+            let face_normal = match hovered_face {
+                0 | 3 => Vector3::new(1.0, 0.0, 0.0),
+                1 | 4 => Vector3::new(0.0, 1.0, 0.0),
+                2 | 5 => Vector3::new(0.0, 0.0, 1.0),
+                _ => panic!("invalid face index"),
+            };
+            let ray_end_projected = ray_end - face_normal * (ray_end - face_center).dot(&face_normal);
+            let stretch_amount = (component(ray_end_projected) - component(face_center)).abs() / 100.0;
+            dbg!(stretch_amount, ray_end_projected, face_center);
+            if hovered_face == 0 || hovered_face == 3 {
+                apply_uniaxial_stretch(&self.reference, &mut self.current, stretch_amount, hovered_face);
+            }
+        }
         update_cube_faces(&mut self.cube_faces, &self.current.vertices);
         // TODO: do we have to rebuild every frame? 
         self.face_bvh = Bvh::build(&mut self.cube_faces);
@@ -413,7 +444,8 @@ impl Cube {
     }
 
     pub fn to_particle_renderable(&self) -> Vec<Vertex> {
-        let (min_x, max_x) = x_face_bounds(&self.reference);
+        // TODO: verify 0 is x direction face
+        let (min_x, max_x) = face_bounds(&self.reference, 0);
         self.current
             .vertices
             .iter()
@@ -601,30 +633,62 @@ impl CubeShape {
 
 }
 
-fn x_face_bounds(shape: &CubeShape) -> (f32, f32) {
-    let min_x = shape
+// fn x_face_bounds(shape: &CubeShape) -> (f32, f32) {
+//     let min_x = shape
+//         .vertices
+//         .iter()
+//         .map(|v| v.position.x)
+//         .fold(f32::INFINITY, f32::min);
+//     let max_x = shape
+//         .vertices
+//         .iter()
+//         .map(|v| v.position.x)
+//         .fold(f32::NEG_INFINITY, f32::max);
+//     (min_x, max_x)
+// }
+
+fn face_bounds(shape: &CubeShape, face_index: usize) -> (f32, f32) {
+    let component = |v: &PhysicsVertex| cubeface_component(v.position, face_index);
+    let min = shape
         .vertices
         .iter()
-        .map(|v| v.position.x)
+        .map(component)
         .fold(f32::INFINITY, f32::min);
-    let max_x = shape
+    let max = shape
         .vertices
         .iter()
-        .map(|v| v.position.x)
+        .map(component)
         .fold(f32::NEG_INFINITY, f32::max);
-    (min_x, max_x)
+    (min, max)
 }
 
-fn apply_uniaxial_x_stretch(reference: &CubeShape, current: &mut CubeShape, stretch_amount: f32) {
-    let (min_x, max_x) = x_face_bounds(reference);
+fn apply_uniaxial_stretch(reference: &CubeShape, current: &mut CubeShape, stretch_amount: f32, face_index: usize) {
+    let (min, max) = face_bounds(reference, face_index);
+    let component = |v: &PhysicsVertex| cubeface_component(v.position, face_index);
 
     for (reference_vertex, current_vertex) in reference.vertices.iter().zip(current.vertices.iter_mut()) {
-        if (reference_vertex.position.x - min_x).abs() < 1e-6 {
-            current_vertex.position.x = reference_vertex.position.x;
-            current_vertex.velocity.x = 0.0;
-        } else if (reference_vertex.position.x - max_x).abs() < 1e-6 {
-            current_vertex.position.x = reference_vertex.position.x + stretch_amount;
-            current_vertex.velocity.x = 0.0;
+        if (component(reference_vertex) - min).abs() < 1e-6 {
+            match face_index {
+                0 => current_vertex.position.x = reference_vertex.position.x,
+                1 => current_vertex.position.y = reference_vertex.position.y,
+                2 => current_vertex.position.z = reference_vertex.position.z,
+                3 => current_vertex.position.x = reference_vertex.position.x,
+                4 => current_vertex.position.y = reference_vertex.position.y,
+                5 => current_vertex.position.z = reference_vertex.position.z,
+                _ => panic!("invalid face index"),
+            }
+            current_vertex.velocity = Vector3::zeros();
+        } else if (component(reference_vertex) - max).abs() < 1e-6 {
+            match face_index {
+                0 => current_vertex.position.x = reference_vertex.position.x + stretch_amount,
+                1 => current_vertex.position.y = reference_vertex.position.y + stretch_amount,
+                2 => current_vertex.position.z = reference_vertex.position.z + stretch_amount,
+                3 => current_vertex.position.x = reference_vertex.position.x + stretch_amount,
+                4 => current_vertex.position.y = reference_vertex.position.y + stretch_amount,
+                5 => current_vertex.position.z = reference_vertex.position.z + stretch_amount,
+                _ => panic!("invalid face index"),
+            }
+            current_vertex.velocity = Vector3::zeros();
         }
     }
 }
