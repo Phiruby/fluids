@@ -30,7 +30,7 @@ enum RenderMode {
     Mesh,
 }
 
-const RENDER_MODE: RenderMode = RenderMode::Mesh;
+const RENDER_MODE: RenderMode = RenderMode::Particles;
 
 pub(crate) struct Ray {
     start: cgmath::Point3<f32>,
@@ -465,10 +465,10 @@ impl State {
         );
         self.object.update(&self.mouse_state, hovered_face.clone(), &ray);
         match RENDER_MODE {
-            RenderMode::Particles => self.render_pipeline.update(
-                &self.queue,
-                &self.object.to_particle_renderable(),
-            ),
+            RenderMode::Particles => {
+                let (vertices, _) = self.object.to_renderable_with_hover(hovered_face);
+                self.render_pipeline.update(&self.queue, &vertices);
+            },
             RenderMode::Mesh => {
                 let (vertices, _) = self.object.to_renderable_with_hover(hovered_face);
                 self.mesh_pipeline.update(&self.queue, &vertices);
