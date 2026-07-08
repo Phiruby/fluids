@@ -8,10 +8,11 @@ use bvh::bounding_hierarchy::{BHShape, BoundingHierarchy};
 use bvh::bvh::Bvh;
 use bvh::ray::Ray as BvhRay;
 use crate::{MouseState, Ray};
-const DT: f32 = 0.01;
+const DT: f32 = 0.002;
 const VELOCITY_DAMPING: f32 = 0.995;
-const STRETCH_RATE: f32 = 0.15;
-const MAX_STRETCH: f32 = 1.05;
+const STRETCH_FORCE: f32 = 80.0;
+const STRETCH_DAMPING: f32 = 8.0;
+const MAX_STRETCH: f32 = 5.05;
 #[derive(Debug, Clone)]
 #[allow(unused)]
 struct PhysicsVertex {
@@ -316,7 +317,6 @@ pub struct Cube {
     face_bvh: Bvh<f32, 3>,
     kernel: CubicKernel,
     selected_face_index: Option<usize>,
-    previous_stretch_amount: f32
 }
 
 impl Cube {
@@ -370,50 +370,52 @@ impl Cube {
             cube_faces,
             face_bvh,
             selected_face_index: None,
-            previous_stretch_amount: 0.0,
         }
     }
 
     pub fn update(&mut self, mouse_state: &MouseState, hovered_face: Option<usize>, ray: &Ray) {
-        let forces = compute_forces(self, &self.kernel);
+        let mut forces = compute_forces(self, &self.kernel);
+
+        if let Some(hovered_face) = hovered_face && mouse_state.is_pressed && let None = self.selected_face_index {
+            self.selected_face_index = Some(hovered_face);
+        } else if !mouse_state.is_pressed {
+            self.selected_face_index = None;
+        }
+
+        let stretch_state = self.selected_face_index.map(|hovered_face| {
+            let normal = face_normal(hovered_face);
+            let ray_end_projected = ray.project_to(normal);
+            let target_axis = cubeface_component(
+                Vector3::new(ray_end_projected.x, ray_end_projected.y, ray_end_projected.z),
+                hovered_face,
+            );
+            let target_axis = clamp_stretch_target(hovered_face, &self.reference, target_axis);
+            let hovered_indices = self.cube_faces[hovered_face].vertex_indices.clone();
+            let opposite = opposite_face(hovered_face);
+            let opposite_indices = self.cube_faces[opposite].vertex_indices.clone();
+            (hovered_face, target_axis, hovered_indices, opposite, opposite_indices)
+        });
+
+        if let Some((hovered_face, target_axis, hovered_indices, _, _)) = &stretch_state {
+            apply_face_stretch_forces(
+                &self.current,
+                *hovered_face,
+                hovered_indices,
+                *target_axis,
+                &mut forces,
+            );
+        }
+
         self.current.vertices.iter_mut().zip(forces).for_each(|(v, f)| {
             v.velocity += f * DT / v.mass;
             v.velocity *= VELOCITY_DAMPING;
         });
         self.current.update();
 
-        if let Some(hovered_face) = hovered_face && mouse_state.is_pressed && let None = self.selected_face_index {
-            self.selected_face_index = Some(hovered_face);
-        } else if let None = hovered_face && !mouse_state.is_pressed {
-            self.selected_face_index = None;
+        if let Some((_, _, _, opposite, opposite_indices)) = stretch_state {
+            pin_face_vertices(&self.reference, &mut self.current, opposite, &opposite_indices);
         }
 
-        if let Some(hovered_face) = self.selected_face_index {
-            let component = |v: Point3<f32>| cubeface_component(Vector3::new(v.x, v.y, v.z), hovered_face);
-            dbg!(hovered_face);
-            // compute stretch amount based on end of ray and reference face position
-            let face = &self.cube_faces[hovered_face];
-            let face_center = face.center;
-            let ray_end = Point3::new(ray.end.x, ray.end.y, ray.end.z);
-            // project ray to relevant face normal
-            let face_normal = match hovered_face {
-                0 => -Vector3::new(1.0, 0.0, 0.0),
-                1 => -Vector3::new(0.0, 1.0, 0.0),
-                2 => -Vector3::new(0.0, 0.0, 1.0),
-                3 => Vector3::new(1.0, 0.0, 0.0),
-                4 => Vector3::new(0.0, 1.0, 0.0),
-                5 => Vector3::new(0.0, 0.0, 1.0),
-                _ => panic!("invalid face index"),
-            };
-            let ray_end_projected = ray.project_to(face_normal);
-            let ray_end_projected = Point3::new(ray_end_projected.x, ray_end_projected.y, ray_end_projected.z);
-            let stretch_amount = (component(ray_end_projected) - component(face_center)).abs();
-            dbg!(stretch_amount, ray_end_projected, face_center);
-            let stretch_amount = 0.007 * stretch_amount + 0.993 * self.previous_stretch_amount;
-            self.previous_stretch_amount = stretch_amount;
-            
-            apply_uniaxial_stretch(&self.reference, &mut self.current, stretch_amount, hovered_face);
-        }
         update_cube_faces(&mut self.cube_faces, &self.current.vertices);
         // TODO: do we have to rebuild every frame? 
         self.face_bvh = Bvh::build(&mut self.cube_faces);
@@ -649,19 +651,6 @@ impl CubeShape {
 
 }
 
-// fn x_face_bounds(shape: &CubeShape) -> (f32, f32) {
-//     let min_x = shape
-//         .vertices
-//         .iter()
-//         .map(|v| v.position.x)
-//         .fold(f32::INFINITY, f32::min);
-//     let max_x = shape
-//         .vertices
-//         .iter()
-//         .map(|v| v.position.x)
-//         .fold(f32::NEG_INFINITY, f32::max);
-//     (min_x, max_x)
-// }
 
 fn face_bounds(shape: &CubeShape, face_index: usize) -> (f32, f32) {
     let component = |v: &PhysicsVertex| cubeface_component(v.position, face_index);
@@ -678,30 +667,96 @@ fn face_bounds(shape: &CubeShape, face_index: usize) -> (f32, f32) {
     (min, max)
 }
 
-fn apply_uniaxial_stretch(reference: &CubeShape, current: &mut CubeShape, stretch_amount: f32, face_index: usize) {
-    let (min, max) = face_bounds(reference, face_index);
-    let component = |v: &PhysicsVertex| cubeface_component(v.position, face_index);
+fn opposite_face(face_index: usize) -> usize {
+    match face_index {
+        0 => 3,
+        1 => 4,
+        2 => 5,
+        3 => 0,
+        4 => 1,
+        5 => 2,
+        _ => panic!("invalid face index"),
+    }
+}
 
-    for (reference_vertex, current_vertex) in reference.vertices.iter().zip(current.vertices.iter_mut()) {
-        if (component(reference_vertex) - min).abs() < 1e-6 {
-            match face_index {
-                0 => {current_vertex.position.x = reference_vertex.position.x; current_vertex.velocity.x = 0.0;},
-                1 => {current_vertex.position.y = reference_vertex.position.y; current_vertex.velocity.y = 0.0;},
-                2 => {current_vertex.position.z = reference_vertex.position.z; current_vertex.velocity.z = 0.0;},
-                3 => {current_vertex.position.x = reference_vertex.position.x; current_vertex.velocity.x = 0.0;},
-                4 => {current_vertex.position.y = reference_vertex.position.y; current_vertex.velocity.y = 0.0;},
-                5 => {current_vertex.position.z = reference_vertex.position.z; current_vertex.velocity.z = 0.0;},
-                _ => panic!("invalid face index"),
+fn face_axis(face_index: usize) -> usize {
+    match face_index {
+        0 | 3 => 0,
+        1 | 4 => 1,
+        2 | 5 => 2,
+        _ => panic!("invalid face index"),
+    }
+}
+
+fn face_normal(face_index: usize) -> Vector3<f32> {
+    match face_index {
+        0 => Vector3::new(-1.0, 0.0, 0.0),
+        1 => Vector3::new(0.0, -1.0, 0.0),
+        2 => Vector3::new(0.0, 0.0, -1.0),
+        3 => Vector3::new(1.0, 0.0, 0.0),
+        4 => Vector3::new(0.0, 1.0, 0.0),
+        5 => Vector3::new(0.0, 0.0, 1.0),
+        _ => panic!("invalid face index"),
+    }
+}
+
+fn clamp_stretch_target(face_index: usize, reference: &CubeShape, target: f32) -> f32 {
+    let (min, max) = face_bounds(reference, face_index);
+    let extra = (max - min) * (MAX_STRETCH - 1.0);
+    if face_index <= 2 {
+        target.clamp(min - extra, min)
+    } else {
+        target.clamp(max, max + extra)
+    }
+}
+
+fn apply_face_stretch_forces(
+    current: &CubeShape,
+    face_index: usize,
+    vertex_indices: &[usize],
+    target_axis: f32,
+    forces: &mut [Vector3<f32>],
+) {
+    let axis = face_axis(face_index);
+    for &idx in vertex_indices {
+        let vertex = &current.vertices[idx];
+        let (current_axis, velocity_axis) = match axis {
+            0 => (vertex.position.x, vertex.velocity.x),
+            1 => (vertex.position.y, vertex.velocity.y),
+            _ => (vertex.position.z, vertex.velocity.z),
+        };
+        let force_scalar =
+            STRETCH_FORCE * (target_axis - current_axis) - STRETCH_DAMPING * velocity_axis;
+        match axis {
+            0 => forces[idx].x += force_scalar.max(STRETCH_FORCE),
+            1 => forces[idx].y += force_scalar.max(STRETCH_FORCE),
+            _ => forces[idx].z += force_scalar.max(STRETCH_FORCE),
+        }
+    }
+}
+
+fn pin_face_vertices(
+    reference: &CubeShape,
+    current: &mut CubeShape,
+    face_index: usize,
+    vertex_indices: &[usize],
+) {
+    let axis = face_axis(face_index);
+    for &idx in vertex_indices {
+        let ref_v = &reference.vertices[idx];
+        let cur_v = &mut current.vertices[idx];
+        match axis {
+            0 => {
+                cur_v.position.x = ref_v.position.x;
+                cur_v.velocity.x = 0.0;
             }
-        } else if (component(reference_vertex) - max).abs() < 1e-6 {
-            match face_index {
-                0 => {current_vertex.position.x = reference_vertex.position.x + stretch_amount; current_vertex.velocity.x = 0.0; },
-                1 => {current_vertex.position.y = reference_vertex.position.y + stretch_amount; current_vertex.velocity.y = 0.0;},
-                2 => {current_vertex.position.z = reference_vertex.position.z + stretch_amount; current_vertex.velocity.z = 0.0;},
-                3 => {current_vertex.position.x = reference_vertex.position.x + stretch_amount; current_vertex.velocity.x = 0.0;},
-                4 => {current_vertex.position.y = reference_vertex.position.y + stretch_amount; current_vertex.velocity.y = 0.0;},
-                5 => {current_vertex.position.z = reference_vertex.position.z + stretch_amount; current_vertex.velocity.z = 0.0;},
-                _ => panic!("invalid face index"),
+            1 => {
+                cur_v.position.y = ref_v.position.y;
+                cur_v.velocity.y = 0.0;
+            }
+            _ => {
+                cur_v.position.z = ref_v.position.z;
+                cur_v.velocity.z = 0.0;
             }
         }
     }
@@ -998,26 +1053,23 @@ mod tests {
     }
 
     #[test]
-    fn uniaxial_stretch_constrains_only_x_on_end_faces() {
+    fn pin_face_restores_axis_position_and_velocity() {
         let reference = CubeShape::new_static(3, 1.0);
         let mut current = CubeShape::new(3, 1.0);
+        let faces = build_cube_faces(&reference.vertices, 3);
 
         for vertex in &mut current.vertices {
             vertex.position += Vector3::new(0.2, 0.3, 0.4);
             vertex.velocity = Vector3::new(1.0, 2.0, 3.0);
         }
 
-        apply_uniaxial_x_stretch(&reference, &mut current, 0.25);
-        let (min_x, max_x) = x_face_bounds(&reference);
+        pin_face_vertices(&reference, &mut current, 0, &faces[0].vertex_indices);
 
-        for (reference_vertex, current_vertex) in reference.vertices.iter().zip(current.vertices.iter()) {
-            if (reference_vertex.position.x - min_x).abs() < 1e-6 {
-                assert_eq!(current_vertex.position.x, reference_vertex.position.x);
-                assert_eq!(current_vertex.velocity.x, 0.0);
-            } else if (reference_vertex.position.x - max_x).abs() < 1e-6 {
-                assert_eq!(current_vertex.position.x, reference_vertex.position.x + 0.25);
-                assert_eq!(current_vertex.velocity.x, 0.0);
-            }
+        for &idx in &faces[0].vertex_indices {
+            let reference_vertex = &reference.vertices[idx];
+            let current_vertex = &current.vertices[idx];
+            assert_eq!(current_vertex.position.x, reference_vertex.position.x);
+            assert_eq!(current_vertex.velocity.x, 0.0);
         }
     }
 }
