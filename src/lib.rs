@@ -23,6 +23,7 @@ use wasm_bindgen::prelude::*;
 use winit::platform::web::EventLoopExtWebSys;
 use bytemuck;
 use cgmath;
+use nalgebra::Vector3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RenderMode {
@@ -37,6 +38,24 @@ pub(crate) struct Ray {
     end: cgmath::Point3<f32>,
 }
 
+impl Ray {
+    pub fn project_to(&self, axis: Vector3<f32>) -> Vector3<f32> {
+        let e = Vector3::new(1.0, 1.0, 1.0);
+        let axis = axis.normalize();
+        let start = Vector3::new(self.start.x, self.start.y, self.start.z);
+        let end = Vector3::new(self.end.x, self.end.y, self.end.z);
+        let sum_r0 = e.dot(&start);
+        let dir = (end - start).normalize();
+        let sum_r = e.dot(&dir);
+        let sum_v = e.dot(&axis);
+        let u = (sum_r0 + sum_r0 * sum_r) / (1.0 + sum_r * sum_v);
+        let t = (sum_r0 - u * sum_v) / dir.norm();
+        let closest_to_axis = start + dir * t.max(0.0);
+        // project this to the axis
+        let projected = axis * closest_to_axis.dot(&axis);
+        projected
+    }
+}
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
     cgmath::Vector4::new(1.0, 0.0, 0.0, 0.0),

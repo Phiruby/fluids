@@ -405,9 +405,9 @@ impl Cube {
                 5 => Vector3::new(0.0, 0.0, 1.0),
                 _ => panic!("invalid face index"),
             };
-            let ray_end_projected = face_normal * (ray_end - face_center).dot(&face_normal);
+            let ray_end_projected = ray.project_to(face_normal);
             let ray_end_projected = Point3::new(ray_end_projected.x, ray_end_projected.y, ray_end_projected.z);
-            let stretch_amount = (component(ray_end_projected) - component(face_center)).abs() / 100.0;
+            let stretch_amount = (component(ray_end_projected) - component(face_center)).abs();
             dbg!(stretch_amount, ray_end_projected, face_center);
             let stretch_amount = 0.007 * stretch_amount + 0.993 * self.previous_stretch_amount;
             self.previous_stretch_amount = stretch_amount;
