@@ -31,7 +31,7 @@ enum RenderMode {
     Mesh,
 }
 
-const RENDER_MODE: RenderMode = RenderMode::Particles;
+const RENDER_MODE: RenderMode = RenderMode::Mesh;
 
 pub(crate) struct Ray {
     start: cgmath::Point3<f32>,
@@ -174,6 +174,7 @@ impl CameraUniform {
 pub(crate) struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
+    normal: [f32; 3],
 }
 
 impl Vertex {
@@ -192,6 +193,11 @@ impl Vertex {
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
             ],
         }
     }
@@ -207,12 +213,12 @@ impl Vertex {
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
-                    shader_location: 1,
+                    shader_location: 2,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 2,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32x3,
                 },
             ],

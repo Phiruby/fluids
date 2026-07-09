@@ -10,7 +10,7 @@ use bvh::ray::Ray as BvhRay;
 use crate::{MouseState, Ray};
 const DT: f32 = 0.002;
 const VELOCITY_DAMPING: f32 = 0.995;
-const STRETCH_FORCE: f32 = 80.0;
+const STRETCH_FORCE: f32 = 60.0;
 const STRETCH_DAMPING: f32 = 8.0;
 const MAX_STRETCH: f32 = 5.05;
 #[derive(Debug, Clone)]
@@ -29,6 +29,7 @@ impl From<PhysicsVertex> for Vertex {
             // hackery to access vector from position: https://docs.rs/nalgebra/latest/nalgebra/base/type.Vector3.html
             position: vertex.position.data.0[0],
             color: [0.5, 0.0, 0.5],
+            normal: [0.0, 0.0, 1.0],
         }
     }
 }
@@ -384,7 +385,8 @@ impl Cube {
 
         let stretch_state = self.selected_face_index.map(|hovered_face| {
             let normal = face_normal(hovered_face);
-            let ray_end_projected = ray.project_to(normal);
+            let cube_center = self.cube_faces.iter().fold(Vector3::zeros(), |acc, face| acc + face.center.coords) / 6.0;
+            let ray_end_projected = ray.project_to(normal) - cube_center;
             let target_axis = cubeface_component(
                 Vector3::new(ray_end_projected.x, ray_end_projected.y, ray_end_projected.z),
                 hovered_face,
@@ -393,6 +395,7 @@ impl Cube {
             let hovered_indices = self.cube_faces[hovered_face].vertex_indices.clone();
             let opposite = opposite_face(hovered_face);
             let opposite_indices = self.cube_faces[opposite].vertex_indices.clone();
+            dbg!(&cube_center, &ray_end_projected, &target_axis, &hovered_face);
             (hovered_face, target_axis, hovered_indices, opposite, opposite_indices)
         });
 
@@ -482,6 +485,7 @@ impl Cube {
                 Vertex {
                     position: [current.position.x, current.position.y, current.position.z],
                     color,
+                    normal: [0.0, 0.0, 1.0],
                 }
             })
             .collect()
@@ -646,6 +650,43 @@ impl CubeShape {
             }
         }
 
+        let mut normal_sums = vec![Vector3::zeros(); vertices.len()];
+        for tri in indices.chunks_exact(3) {
+            let ia = tri[0] as usize;
+            let ib = tri[1] as usize;
+            let ic = tri[2] as usize;
+            let pa = Vector3::new(
+                vertices[ia].position[0],
+                vertices[ia].position[1],
+                vertices[ia].position[2],
+            );
+            let pb = Vector3::new(
+                vertices[ib].position[0],
+                vertices[ib].position[1],
+                vertices[ib].position[2],
+            );
+            let pc = Vector3::new(
+                vertices[ic].position[0],
+                vertices[ic].position[1],
+                vertices[ic].position[2],
+            );
+            let face_normal = (pb - pa).cross(&(pc - pa));
+            if face_normal.norm_squared() > 1e-12 {
+                normal_sums[ia] += face_normal;
+                normal_sums[ib] += face_normal;
+                normal_sums[ic] += face_normal;
+            }
+        }
+
+        for (vertex, normal_sum) in vertices.iter_mut().zip(normal_sums.into_iter()) {
+            let n = if normal_sum.norm_squared() > 1e-12 {
+                normal_sum.normalize()
+            } else {
+                Vector3::new(0.0, 0.0, 1.0)
+            };
+            vertex.normal = [n.x, n.y, n.z];
+        }
+
         (vertices, indices)
     }
 
@@ -721,16 +762,16 @@ fn apply_face_stretch_forces(
     for &idx in vertex_indices {
         let vertex = &current.vertices[idx];
         let (current_axis, velocity_axis) = match axis {
-            0 => (vertex.position.x, vertex.velocity.x),
-            1 => (vertex.position.y, vertex.velocity.y),
+            0 | 3 => (vertex.position.x, vertex.velocity.x),
+            1 | 4 => (vertex.position.y, vertex.velocity.y),
             _ => (vertex.position.z, vertex.velocity.z),
         };
         let force_scalar =
             STRETCH_FORCE * (target_axis - current_axis) - STRETCH_DAMPING * velocity_axis;
         match axis {
-            0 => forces[idx].x += force_scalar.max(STRETCH_FORCE),
-            1 => forces[idx].y += force_scalar.max(STRETCH_FORCE),
-            _ => forces[idx].z += force_scalar.max(STRETCH_FORCE),
+            0 | 3 => forces[idx].x += force_scalar,
+            1 | 4 => forces[idx].y += force_scalar,
+            _ => forces[idx].z += force_scalar,
         }
     }
 }
@@ -948,8 +989,9 @@ pub fn compute_forces(
         &shape.neighbors,
     );
     let reference_volumes = &shape.reference_volumes;
-    let k = 7000.0;
-    let nu = 0.35;
+    // approximate values for rubber
+    let k = 100000.0;
+    let nu = 0.30;
     let mu = k / (2.0 * (1.0 + nu));
     let lambda = k * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
     let stress_tensors = stress_tensor(&deformations_star, mu, lambda);

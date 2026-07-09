@@ -7,6 +7,7 @@ use wgpu::util::DeviceExt;
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct ParticleMeshVertex {
     position: [f32; 3],
+    normal: [f32; 3],
 }
 
 impl ParticleMeshVertex {
@@ -14,11 +15,18 @@ impl ParticleMeshVertex {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            }],
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
         }
     }
 }
@@ -53,14 +61,14 @@ impl LineVertex {
 
 fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
     let vertices = [
-        ParticleMeshVertex { position: [-radius, -radius, -radius] },
-        ParticleMeshVertex { position: [ radius, -radius, -radius] },
-        ParticleMeshVertex { position: [ radius,  radius, -radius] },
-        ParticleMeshVertex { position: [-radius,  radius, -radius] },
-        ParticleMeshVertex { position: [-radius, -radius,  radius] },
-        ParticleMeshVertex { position: [ radius, -radius,  radius] },
-        ParticleMeshVertex { position: [ radius,  radius,  radius] },
-        ParticleMeshVertex { position: [-radius,  radius,  radius] },
+        ParticleMeshVertex { position: [-radius, -radius, -radius], normal: [-0.57735026, -0.57735026, -0.57735026] },
+        ParticleMeshVertex { position: [ radius, -radius, -radius], normal: [ 0.57735026, -0.57735026, -0.57735026] },
+        ParticleMeshVertex { position: [ radius,  radius, -radius], normal: [ 0.57735026,  0.57735026, -0.57735026] },
+        ParticleMeshVertex { position: [-radius,  radius, -radius], normal: [-0.57735026,  0.57735026, -0.57735026] },
+        ParticleMeshVertex { position: [-radius, -radius,  radius], normal: [-0.57735026, -0.57735026,  0.57735026] },
+        ParticleMeshVertex { position: [ radius, -radius,  radius], normal: [ 0.57735026, -0.57735026,  0.57735026] },
+        ParticleMeshVertex { position: [ radius,  radius,  radius], normal: [ 0.57735026,  0.57735026,  0.57735026] },
+        ParticleMeshVertex { position: [-radius,  radius,  radius], normal: [-0.57735026,  0.57735026,  0.57735026] },
     ];
     let indices = [
         0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
@@ -70,6 +78,7 @@ fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
     (vertices, indices)
 }
 
+/// This pipeline renders each particle as a cube
 pub struct RenderPipeline {
     pipeline: PipelineState,
     mesh_buffer: wgpu::Buffer,
