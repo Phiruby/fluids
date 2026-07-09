@@ -111,6 +111,11 @@ impl PhysicsPipeline {
             contents: bytemuck::cast_slice(&[ReferenceGradient::new([0.0; 3])]),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         });
+        let reference_kernel_weights_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Reference kernel weights buffer"),
+            contents: bytemuck::cast_slice(&[0.0]),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        });
         let current_particles_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Current particles buffer"),
             contents: bytemuck::cast_slice(&[Particle::new([0.0; 3], [0.0; 3], 1.0, 1.0, 0, 0, [0; 27])]),
@@ -136,6 +141,10 @@ impl PhysicsPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: reference_kernel_weights_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: output_buffer.as_entire_binding(),
                 },
             ],
