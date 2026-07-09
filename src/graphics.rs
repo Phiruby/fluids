@@ -2,6 +2,7 @@ use wgpu;
 use crate::texture::Texture;
 
 mod pipelines;
+pub mod compute;
 pub use pipelines::{MeshRenderPipeline, RenderPipeline, RayPipeline};
 
 pub(in crate::graphics) struct PipelineInfo<'a> {

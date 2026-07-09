@@ -15,6 +15,7 @@ use crate::texture::Texture;
 use crate::physics::{Cube, CubicKernel};
 use crate::camera::CameraController;
 use crate::graphics::{MeshRenderPipeline, RenderPipeline, RayPipeline};
+use crate::graphics::compute::PhysicsPipeline;
 use cgmath::SquareMatrix;
 
 #[cfg(target_arch = "wasm32")]
@@ -138,6 +139,7 @@ pub struct State {
     render_pipeline: RenderPipeline,
     mesh_pipeline: MeshRenderPipeline,
     ray_pipeline: RayPipeline,
+    physics_pipeline: PhysicsPipeline,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -346,6 +348,7 @@ impl State {
             &mesh_indices,
         );
         let ray_pipeline = RayPipeline::new(&device, &camera_bind_group_layout, config.format);
+        let physics_pipeline = PhysicsPipeline::new(&device);
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
 
         Ok(Self { 
@@ -358,6 +361,7 @@ impl State {
             render_pipeline,
             mesh_pipeline,
             ray_pipeline,
+            physics_pipeline,
             camera,
             camera_controller: CameraController::new(),
             camera_bind_group,
