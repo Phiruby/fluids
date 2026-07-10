@@ -15,11 +15,11 @@ const STRETCH_DAMPING: f32 = 8.0;
 const MAX_STRETCH: f32 = 5.05;
 #[derive(Debug, Clone)]
 #[allow(unused)]
-struct PhysicsVertex {
-    position: Vector3<f32>,
-    velocity: Vector3<f32>,
-    renderable: bool,
-    mass: f32,
+pub struct PhysicsVertex {
+    pub position: Vector3<f32>,
+    pub velocity: Vector3<f32>,
+    pub renderable: bool,
+    pub mass: f32,
 }
 
 
@@ -73,7 +73,7 @@ impl CubicKernel {
         Self { h }
     }
 
-    fn weight(&self, r_norm: f32) -> f32 {
+    pub fn weight(&self, r_norm: f32) -> f32 {
         let q = r_norm / self.h;
         if q >= 1.0 || q < 0.0 {
             return 0.0;
@@ -299,7 +299,7 @@ fn ray_intersect_face(
     Some(t)
 }
 #[derive(Debug)]
-struct CubeShape {
+pub struct CubeShape {
     pub vertices: Vec<PhysicsVertex>,
     n: usize,
     t: f32,
@@ -307,17 +307,17 @@ struct CubeShape {
 
 #[derive(Debug)]
 pub struct Cube {
-    reference: CubeShape,
-    neighbors: Vec<Vec<usize>>,
-    L: Vec<Matrix3<f32>>,
-    reference_gradients: Vec<Vec<Vector3<f32>>>,
-    reference_volumes: Vec<f32>,
-    reference_kernel_weights: Vec<Vec<f32>>,
+    pub reference: CubeShape,
+    pub neighbors: Vec<Vec<usize>>,
+    pub L: Vec<Matrix3<f32>>,
+    pub reference_gradients: Vec<Vec<Vector3<f32>>>,
+    pub reference_volumes: Vec<f32>,
+    pub reference_kernel_weights: Vec<Vec<f32>>,
     pub current: CubeShape,
     pub cube_faces: [CubeFace; 6],
-    face_bvh: Bvh<f32, 3>,
-    kernel: CubicKernel,
-    selected_face_index: Option<usize>,
+    pub face_bvh: Bvh<f32, 3>,
+    pub kernel: CubicKernel,
+    pub selected_face_index: Option<usize>,
 }
 
 impl Cube {

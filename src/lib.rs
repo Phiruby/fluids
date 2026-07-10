@@ -348,7 +348,7 @@ impl State {
             &mesh_indices,
         );
         let ray_pipeline = RayPipeline::new(&device, &camera_bind_group_layout, config.format);
-        let physics_pipeline = PhysicsPipeline::new(&device);
+        let physics_pipeline = PhysicsPipeline::new(&device, Cube::new(m, 1.0 / m as f32, &kernel));
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
 
         Ok(Self { 
