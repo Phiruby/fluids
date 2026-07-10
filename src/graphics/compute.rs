@@ -1,4 +1,4 @@
-use crate::graphics::{create_pipeline, PipelineInfo, PipelineState};
+use crate::graphics::{create_pipeline, PipelineInfo, PipelineState, BufferDebug};
 use crate::Vertex;
 use cgmath::Point3;
 use wgpu::util::DeviceExt;
@@ -9,36 +9,51 @@ use crate::physics::Cube;
 use std::ops::Add;
 use crate::physics::CubicKernel;
 use crate::physics::PhysicsVertex;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable, Default)]
 struct Particle {
     position: [f32; 3],
-    _pad: u32,
+    _pad0: u32,
     velocity: [f32; 3],
-    _pad1: u32,
-    mass: f32,
     density: f32,
+    mass: f32,
     renderable: u32,
     nneighbors: u32,
     neighbors: [u32; 27],
-    _pad3: [u32; 3],
-    L: [f32; 9],
-    _pad4: [u32; 3],
+    _pad2: [u32; 2],
+    L: [f32; 12],
 }
+
+// Must match `compute.wgsl` / WebGPU packing rules.
+const _: () = assert!(std::mem::size_of::<Particle>() == 208);
+const _: () = assert!(std::mem::offset_of!(Particle, density) == 28);
+const _: () = assert!(std::mem::offset_of!(Particle, mass) == 32);
+const _: () = assert!(std::mem::offset_of!(Particle, neighbors) == 44);
+const _: () = assert!(std::mem::offset_of!(Particle, L) == 160);
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct ReferenceGradient {
     gradient: [f32; 3],
-    _pad: [u32; 3],
+    _pad: u32,
 }
 
+const _: () = assert!(std::mem::size_of::<ReferenceGradient>() == 16);
+
 impl ReferenceGradient {
-    fn new(
-        gradient: [f32; 3],
-    ) -> Self {
-        Self { gradient, _pad: [0; 3] }
+    fn new(gradient: [f32; 3]) -> Self {
+        Self { gradient, _pad: 0 }
     }
+}
+
+fn mat3_to_gpu(m: Matrix3<f32>) -> [f32; 12] {
+    let cols = m.data.0;
+    [
+        cols[0][0], cols[0][1], cols[0][2], 0.0,
+        cols[1][0], cols[1][1], cols[1][2], 0.0,
+        cols[2][0], cols[2][1], cols[2][2], 0.0,
+    ]
 }
 
 impl Particle {
@@ -53,31 +68,38 @@ impl Particle {
         L: Matrix3<f32>,
     ) -> Self {
         assert!(neighbors.len() <= 27, "Maximum 27 neighbors");
+        assert!(mass > 0.0, "Mass must be positive");
+        assert!(density > 0.0, "Density must be positive");
         neighbors.resize(27, 0);
         let neighbors = neighbors.into_iter().map(|n| n as u32).collect::<Vec<_>>();
         let neighbors_array = neighbors.try_into().expect("Maximum 27 neighbors");
-        Self { 
-            position: position.data.0[0], 
-            _pad: 0, 
-            velocity: velocity.data.0[0], 
-            _pad1: 0, 
-            mass, 
-            density, 
-            renderable, 
-            nneighbors, 
-            neighbors: neighbors_array, 
-            _pad3: [0; 3], 
-            L: L.data.0.into_iter().flatten().collect::<Vec<f32>>().try_into().expect("Maximum 9 elements"), 
-            _pad4: [0; 3],
+        Self {
+            position: position.data.0[0],
+            _pad0: 0,
+            velocity: velocity.data.0[0],
+            density,
+            mass,
+            renderable,
+            nneighbors,
+            neighbors: neighbors_array,
+            _pad2: [0; 2],
+            L: mat3_to_gpu(L),
         }
     }
 }
 
 pub struct PhysicsPipeline {
     pipeline: wgpu::ComputePipeline,
-    input_buffer: wgpu::Buffer,
     output_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    alt_bind_group: wgpu::BindGroup,
+    current_particles_buffer: wgpu::Buffer,
+    reference_gradients_buffer: wgpu::Buffer,
+    reference_kernel_weights_buffer: wgpu::Buffer,
+    reference_particles_buffer: wgpu::Buffer,
+    particle_count: u32,
+    use_alt: bool,
+    debugger: BufferDebug,
 }
 
 impl PhysicsPipeline {
@@ -137,9 +159,12 @@ impl PhysicsPipeline {
             .flatten()
             .collect();
 
-        let out = vec![Particle::default(); current_particles.len()];
+        let out = current_particles.clone();
+        let particle_count = current_particles.len() as u32;
+        let particle_usage =
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
 
-        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let reference_particles_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Input buffer"),
             contents: bytemuck::cast_slice(&reference_particles),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
@@ -147,7 +172,7 @@ impl PhysicsPipeline {
         let output_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Output buffer"),
             contents: bytemuck::cast_slice(&out),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: particle_usage,
         });
         let reference_gradients_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Reference gradients buffer"),
@@ -162,7 +187,7 @@ impl PhysicsPipeline {
         let current_particles_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Current particles buffer"),
             contents: bytemuck::cast_slice(&current_particles),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: particle_usage,
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -171,7 +196,7 @@ impl PhysicsPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: input_buffer.as_entire_binding(),
+                    resource: reference_particles_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -192,24 +217,72 @@ impl PhysicsPipeline {
             ],
         });
 
-        Self { pipeline, input_buffer, output_buffer, bind_group }
+        let alt_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: reference_particles_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: reference_gradients_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: reference_kernel_weights_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: current_particles_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let buffer_size = reference_particles_buffer.size();
+        Self { 
+            pipeline, 
+            output_buffer, 
+            bind_group,
+            alt_bind_group,
+            current_particles_buffer,
+            reference_gradients_buffer,
+            reference_kernel_weights_buffer,
+            reference_particles_buffer,
+            particle_count,
+            use_alt: false,
+            debugger: BufferDebug::new(device, buffer_size),
+        }
     }
 
     pub fn update(
         &mut self,
-        queue: &wgpu::Queue,
-        start: Point3<f32>,
-        end: Point3<f32>,
-        color: [f32; 3],
+        _queue: &wgpu::Queue,
+        _start: Point3<f32>,
+        _end: Point3<f32>,
+        _color: [f32; 3],
     ) {
        todo!();
     }
 
-    pub fn compute(&self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn compute(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
+        self.debugger
+            .log::<Particle>(_device, _queue, &self.output_buffer);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.dispatch_workgroups(0, 1, 1);
+        if self.use_alt {
+            pass.set_bind_group(0, &self.alt_bind_group, &[]);
+        } else {
+            pass.set_bind_group(0, &self.bind_group, &[]);
+        }
+        self.use_alt = !self.use_alt;
+        let workgroups = self.particle_count.div_ceil(256);
+        pass.dispatch_workgroups(workgroups, 1, 1);
     }
 }
 

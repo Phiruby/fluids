@@ -411,8 +411,10 @@ impl State {
 
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Command encoder for rendering")
+            label: Some("Command encoder for rendering"),
         });
+
+        self.physics_pipeline.compute(&self.device, &self.queue, &mut encoder);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -450,7 +452,7 @@ impl State {
             self.ray_pipeline.draw(&mut render_pass, &self.camera_bind_group);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.queue.submit([encoder.finish()]);
         output.present();
         Ok(())
     }
