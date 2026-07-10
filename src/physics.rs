@@ -490,6 +490,11 @@ impl Cube {
             })
             .collect()
     }
+
+    /// indices into the full compute particle buffer (not a compacted surface list).
+    pub fn surface_indices(&self) -> Vec<u16> {
+        self.current.surface_indices()
+    }
 }
 
 impl CubeShape {
@@ -553,6 +558,88 @@ impl CubeShape {
         } else {
             indices.extend_from_slice(&[a, b, c, a, c, d]);
         }
+    }
+
+    /// Surface triangle indices into the *full* particle grid (same order as the compute buffer).
+    /// Use this when the mesh vertex buffer is the shared Particle buffer.
+    pub fn surface_indices(&self) -> Vec<u16> {
+        let n = self.n;
+        let idx = |i: usize, j: usize, k: usize| self.grid_index(i, j, k) as u16;
+        let mut indices = Vec::new();
+
+        for j in 0..n - 1 {
+            for k in 0..n - 1 {
+                Self::push_quad(
+                    &mut indices,
+                    idx(0, j, k),
+                    idx(0, j + 1, k),
+                    idx(0, j + 1, k + 1),
+                    idx(0, j, k + 1),
+                    false,
+                );
+            }
+        }
+        for j in 0..n - 1 {
+            for k in 0..n - 1 {
+                Self::push_quad(
+                    &mut indices,
+                    idx(n - 1, j, k),
+                    idx(n - 1, j + 1, k),
+                    idx(n - 1, j + 1, k + 1),
+                    idx(n - 1, j, k + 1),
+                    true,
+                );
+            }
+        }
+        for i in 0..n - 1 {
+            for k in 0..n - 1 {
+                Self::push_quad(
+                    &mut indices,
+                    idx(i, 0, k),
+                    idx(i + 1, 0, k),
+                    idx(i + 1, 0, k + 1),
+                    idx(i, 0, k + 1),
+                    false,
+                );
+            }
+        }
+        for i in 0..n - 1 {
+            for k in 0..n - 1 {
+                Self::push_quad(
+                    &mut indices,
+                    idx(i, n - 1, k),
+                    idx(i + 1, n - 1, k),
+                    idx(i + 1, n - 1, k + 1),
+                    idx(i, n - 1, k + 1),
+                    true,
+                );
+            }
+        }
+        for i in 0..n - 1 {
+            for j in 0..n - 1 {
+                Self::push_quad(
+                    &mut indices,
+                    idx(i, j, 0),
+                    idx(i + 1, j, 0),
+                    idx(i + 1, j + 1, 0),
+                    idx(i, j + 1, 0),
+                    false,
+                );
+            }
+        }
+        for i in 0..n - 1 {
+            for j in 0..n - 1 {
+                Self::push_quad(
+                    &mut indices,
+                    idx(i, j, n - 1),
+                    idx(i + 1, j, n - 1),
+                    idx(i + 1, j + 1, n - 1),
+                    idx(i, j + 1, n - 1),
+                    true,
+                );
+            }
+        }
+        indices
     }
 
     pub fn to_renderable(&self) -> (Vec<Vertex>, Vec<u16>) {
@@ -691,7 +778,6 @@ impl CubeShape {
     }
 
 }
-
 
 fn face_bounds(shape: &CubeShape, face_index: usize) -> (f32, f32) {
     let component = |v: &PhysicsVertex| cubeface_component(v.position, face_index);

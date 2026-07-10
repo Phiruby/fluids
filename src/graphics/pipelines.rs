@@ -157,7 +157,6 @@ impl RenderPipeline {
 
 pub struct MeshRenderPipeline {
     pipeline: PipelineState,
-    vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
 }
@@ -167,7 +166,6 @@ impl MeshRenderPipeline {
         device: &wgpu::Device,
         global_bind_group_layout: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
-        vertices: &[Vertex],
         indices: &[u16],
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
@@ -189,11 +187,6 @@ impl MeshRenderPipeline {
                 depth_compare: wgpu::CompareFunction::Less,
             },
         );
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Mesh vertex buffer"),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Mesh index buffer"),
             contents: bytemuck::cast_slice(indices),
@@ -201,19 +194,23 @@ impl MeshRenderPipeline {
         });
         Self {
             pipeline,
-            vertex_buffer,
             index_buffer,
             num_indices: indices.len() as u32,
         }
     }
 
-    pub fn update(&mut self, queue: &wgpu::Queue, vertices: &[Vertex]) {
-        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+    pub fn update(&mut self, _queue: &wgpu::Queue, _vertices: &[Vertex]) {
+        // TODO: now positions come from compute shader buffer
     }
 
-    pub fn draw(&self, render_pass: &mut wgpu::RenderPass, global_bind_group: &wgpu::BindGroup) {
+    pub fn draw(
+        &self,
+        render_pass: &mut wgpu::RenderPass,
+        global_bind_group: &wgpu::BindGroup,
+        particle_buffer: &wgpu::Buffer,
+    ) {
         self.pipeline.bind(render_pass, global_bind_group);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_vertex_buffer(0, particle_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
         render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
     }

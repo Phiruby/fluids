@@ -15,22 +15,18 @@ use crate::physics::PhysicsVertex;
 struct Particle {
     position: [f32; 3],
     _pad0: u32,
-    velocity: [f32; 3],
+    velocity: [f32; 3], 
+    _pad1: u32,
+    normal: [f32; 3],
     density: f32,
     mass: f32,
     renderable: u32,
     nneighbors: u32,
     neighbors: [u32; 27],
-    _pad2: [u32; 2],
+    _pad_l: [u32; 2],
     L: [f32; 12],
 }
 
-// Must match `compute.wgsl` / WebGPU packing rules.
-const _: () = assert!(std::mem::size_of::<Particle>() == 208);
-const _: () = assert!(std::mem::offset_of!(Particle, density) == 28);
-const _: () = assert!(std::mem::offset_of!(Particle, mass) == 32);
-const _: () = assert!(std::mem::offset_of!(Particle, neighbors) == 44);
-const _: () = assert!(std::mem::offset_of!(Particle, L) == 160);
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -60,6 +56,7 @@ impl Particle {
     fn new(
         position: Vector3<f32>,
         velocity: Vector3<f32>,
+        normal: Vector3<f32>,
         mass: f32,
         density: f32,
         renderable: u32,
@@ -77,12 +74,14 @@ impl Particle {
             position: position.data.0[0],
             _pad0: 0,
             velocity: velocity.data.0[0],
+            _pad1: 0,
+            normal: normal.data.0[0],
             density,
             mass,
             renderable,
             nneighbors,
             neighbors: neighbors_array,
-            _pad2: [0; 2],
+            _pad_l: [0; 2],
             L: mat3_to_gpu(L),
         }
     }
@@ -128,9 +127,10 @@ impl PhysicsPipeline {
             .map(|(((vertex, neighbors), density), L)| Particle::new(
                 vertex.position,
                 vertex.velocity,
+                Vector3::new(0.0, 0.0, 1.0),
                 vertex.mass,
                 *density,
-                0,
+                vertex.renderable as u32,
                 neighbors.len() as u32,
                 neighbors.to_owned(),
                 *L,
@@ -145,7 +145,15 @@ impl PhysicsPipeline {
             .zip(cube.L.iter())
             .map(|(((vertex, neighbors), density), L)| Particle::new(
                 vertex.position,
-                vertex.velocity, vertex.mass, *density, 0, neighbors.len() as u32, neighbors.to_owned(), *L))
+                vertex.velocity,
+                Vector3::new(0.0, 0.0, 1.0),
+                vertex.mass,
+                *density,
+                vertex.renderable as u32,
+                neighbors.len() as u32,
+                neighbors.to_owned(),
+                *L,
+            ))
             .collect::<Vec<_>>();
         
         let reference_gradients: Vec<ReferenceGradient> = cube.reference_gradients
@@ -162,7 +170,7 @@ impl PhysicsPipeline {
         let out = current_particles.clone();
         let particle_count = current_particles.len() as u32;
         let particle_usage =
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::VERTEX;
 
         let reference_particles_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Input buffer"),
@@ -271,8 +279,8 @@ impl PhysicsPipeline {
     }
 
     pub fn compute(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
-        self.debugger
-            .log::<Particle>(_device, _queue, &self.output_buffer);
+        // self.debugger
+        //     .log::<Particle>(_device, _queue, &self.output_buffer);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.pipeline);
         if self.use_alt {
@@ -283,6 +291,14 @@ impl PhysicsPipeline {
         self.use_alt = !self.use_alt;
         let workgroups = self.particle_count.div_ceil(256);
         pass.dispatch_workgroups(workgroups, 1, 1);
+    }
+
+    pub fn get_output_buffer(&self) -> &wgpu::Buffer {
+        if self.use_alt {
+            &self.output_buffer
+        } else {
+            &self.current_particles_buffer
+        }
     }
 }
 

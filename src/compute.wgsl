@@ -1,6 +1,7 @@
 struct Particle {
     position: vec3<f32>,
     velocity: vec3<f32>,
+    normal: vec3<f32>,
     density: f32,
     mass: f32,
     renderable: u32,

@@ -180,10 +180,11 @@ pub(crate) struct Vertex {
 }
 
 impl Vertex {
-    pub(crate) fn layout() -> wgpu::VertexBufferLayout<'static> {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            array_stride: 224, 
             step_mode: wgpu::VertexStepMode::Vertex,
+            // NOTE the offsets: they're from compute shader's `Particle` struct
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
@@ -191,14 +192,14 @@ impl Vertex {
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    offset: 32,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                    offset: 52,
                     shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Uint32,
                 },
             ],
         }
@@ -251,21 +252,27 @@ impl State {
                 force_fallback_adapter: false,
             })
             .await?;
+        
+        let device_limits = adapter.limits();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut required_limits = wgpu::Limits::default();
+        #[cfg(target_arch = "wasm32")]
+        let mut required_limits = wgpu::Limits::downlevel_webgl2_defaults();
+
+        required_limits.max_storage_buffer_binding_size = device_limits.max_storage_buffer_binding_size;
+        required_limits.max_buffer_size = device_limits.max_buffer_size;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::empty(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                #[cfg(not(target_arch = "wasm32"))]
-                required_limits: wgpu::Limits::default(),
-                #[cfg(target_arch = "wasm32")]
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                required_limits,
                 memory_hints: Default::default(),
                 trace: wgpu::Trace::Off
             })
             .await?;
-        
         let surface_capabilities = surface.get_capabilities(&adapter);
 
         let surface_format = surface_capabilities.formats.iter()
@@ -328,7 +335,7 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
-        let m = 11;
+        let m = 20;
         let kernel = CubicKernel::new(1.0 / (m - 1) as f32);
         let cube = Cube::new(m, 1.0 / m as f32, &kernel);
         let instances = cube.to_particle_renderable();
@@ -339,13 +346,11 @@ impl State {
             0.2 / m as f32,
             &instances,
         );
-        let (mesh_vertices, mesh_indices) = cube.to_renderable();
         let mesh_pipeline = MeshRenderPipeline::new(
             &device,
             &camera_bind_group_layout,
             config.format,
-            &mesh_vertices,
-            &mesh_indices,
+            &cube.surface_indices(),
         );
         let ray_pipeline = RayPipeline::new(&device, &camera_bind_group_layout, config.format);
         let physics_pipeline = PhysicsPipeline::new(&device, Cube::new(m, 1.0 / m as f32, &kernel));
@@ -447,7 +452,7 @@ impl State {
             });
             match RENDER_MODE {
                 RenderMode::Particles => self.render_pipeline.draw(&mut render_pass, &self.camera_bind_group),
-                RenderMode::Mesh => self.mesh_pipeline.draw(&mut render_pass, &self.camera_bind_group),
+                RenderMode::Mesh => self.mesh_pipeline.draw(&mut render_pass, &self.camera_bind_group, &self.physics_pipeline.get_output_buffer()),
             }
             self.ray_pipeline.draw(&mut render_pass, &self.camera_bind_group);
         }
@@ -494,17 +499,17 @@ impl State {
             (ray.start.x, ray.start.y, ray.start.z),
             (ray.end.x, ray.end.y, ray.end.z),
         );
-        self.object.update(&self.mouse_state, hovered_face.clone(), &ray);
-        match RENDER_MODE {
-            RenderMode::Particles => {
-                let (vertices, _) = self.object.to_renderable_with_hover(hovered_face);
-                self.render_pipeline.update(&self.queue, &vertices);
-            },
-            RenderMode::Mesh => {
-                let (vertices, _) = self.object.to_renderable_with_hover(hovered_face);
-                self.mesh_pipeline.update(&self.queue, &vertices);
-            }
-        }
+        // self.object.update(&self.mouse_state, hovered_face.clone(), &ray);
+        // match RENDER_MODE {
+        //     RenderMode::Particles => {
+        //         let (vertices, _) = self.object.to_renderable_with_hover(hovered_face);
+        //         self.render_pipeline.update(&self.queue, &vertices);
+        //     },
+        //     RenderMode::Mesh => {
+        //         let (vertices, _) = self.object.to_renderable_with_hover(hovered_face);
+        //         self.mesh_pipeline.update(&self.queue, &vertices);
+        //     }
+        // }
     }
 }
 
