@@ -351,8 +351,8 @@ impl PhysicsPipeline {
     }
 
     pub fn compute(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
-        self.debugger
-            .log::<Particle>(_device, _queue, &self.output_buffer);
+        // self.debugger
+        //     .log::<Particle>(_device, _queue, &self.output_buffer);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.pipeline);
         if self.use_alt {

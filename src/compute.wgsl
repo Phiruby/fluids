@@ -23,7 +23,7 @@ struct InteractionState {
     selected_face: i32,
 }
 
-const DT: f32 = 0.002;
+const DT: f32 = 0.0004;
 const VELOCITY_DAMPING: f32 = 0.995;
 const PENALTY_ALPHA: f32 = 0.9;
 const STRETCH_FORCE: f32 = 60.0;
@@ -74,6 +74,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var particle = current_particles[particle_index];
+    let pre_force_position = particle.position;
     var force = compute_force(particle_index);
     let penalty_force = compute_penalty_force(
         particle_index,
@@ -102,7 +103,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if selected >= 0 {
         let opposite = opposite_face(u32(selected));
         if particle_on_face(particle_index, opposite, n) {
-            pin_particle_axis(&particle, particle_index, opposite);
+            pin_particle_axis(&particle, pre_force_position, opposite);
         }
     }
 
@@ -313,20 +314,20 @@ fn face_stretch_force(particle: Particle, face: u32, target_axis: f32) -> vec3<f
     return force;
 }
 
-fn pin_particle_axis(particle: ptr<function, Particle>, idx: u32, face: u32) {
+// NOTE: this function fully assisted by AI
+fn pin_particle_axis(particle: ptr<function, Particle>, pinned_position: vec3<f32>, face: u32) {
     let axis = face_axis(face);
-    let ref_p = reference_particles[idx].position;
     switch axis {
         case 0u: {
-            (*particle).position.x = ref_p.x;
+            (*particle).position.x = pinned_position.x;
             (*particle).velocity.x = 0.0;
         }
         case 1u: {
-            (*particle).position.y = ref_p.y;
+            (*particle).position.y = pinned_position.y;
             (*particle).velocity.y = 0.0;
         }
         default: {
-            (*particle).position.z = ref_p.z;
+            (*particle).position.z = pinned_position.z;
             (*particle).velocity.z = 0.0;
         }
     }
