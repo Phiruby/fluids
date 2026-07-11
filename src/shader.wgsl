@@ -1,4 +1,3 @@
-// Vertex shader
 struct CameraUniform {
     view_proj: mat4x4<f32>,
 }
@@ -15,7 +14,8 @@ struct VertexInput {
 
 struct MeshVertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
+    // NOTE: for now Particle.normal is used as mesh color
+    @location(1) color: vec3<f32>,
     @location(2) renderable: u32,
 }
 
@@ -65,8 +65,8 @@ fn vs_mesh_main(
     input: MeshVertexInput
 ) -> VertexOutput {
     var out: VertexOutput;
-    out.color = vec3<f32>(0.72, 0.45, 0.95);
-    out.world_normal = input.normal;
+    out.color = input.color;
+    out.world_normal = vec3<f32>(0.0, 0.0, 1.0);
     // Index buffer already references only surface (renderable) grid particles.
     out.clip_position = camera.view_proj * vec4<f32>(input.position, 1.0);
     return out;

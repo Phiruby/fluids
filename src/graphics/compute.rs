@@ -1,5 +1,4 @@
-use crate::graphics::{create_pipeline, PipelineInfo, PipelineState, BufferDebug};
-use crate::Vertex;
+use crate::graphics::BufferDebug;
 use cgmath::Point3;
 use wgpu::util::DeviceExt;
 use bytemuck;
@@ -15,7 +14,7 @@ use crate::physics::PhysicsVertex;
 struct Particle {
     position: [f32; 3],
     _pad0: u32,
-    velocity: [f32; 3], 
+    velocity: [f32; 3],
     _pad1: u32,
     normal: [f32; 3],
     density: f32,
@@ -27,7 +26,6 @@ struct Particle {
     L: [f32; 12],
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct ReferenceGradient {
@@ -36,6 +34,25 @@ struct ReferenceGradient {
 }
 
 const _: () = assert!(std::mem::size_of::<ReferenceGradient>() == 16);
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SimParams {
+    ray_origin: [f32; 3],
+    mouse_pressed: u32,
+    ray_end: [f32; 3],
+    grid_n: u32,
+    ref_min: [f32; 3],
+    _pad0: u32,
+    ref_max: [f32; 3],
+    _pad1: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct InteractionState {
+    selected_face: i32,
+}
 
 impl ReferenceGradient {
     fn new(gradient: [f32; 3]) -> Self {
@@ -52,11 +69,12 @@ fn mat3_to_gpu(m: Matrix3<f32>) -> [f32; 12] {
     ]
 }
 
+const DEFAULT_MESH_COLOR: [f32; 3] = [0.72, 0.45, 0.95];
+
 impl Particle {
     fn new(
         position: Vector3<f32>,
         velocity: Vector3<f32>,
-        normal: Vector3<f32>,
         mass: f32,
         density: f32,
         renderable: u32,
@@ -75,7 +93,7 @@ impl Particle {
             _pad0: 0,
             velocity: velocity.data.0[0],
             _pad1: 0,
-            normal: normal.data.0[0],
+            normal: DEFAULT_MESH_COLOR,
             density,
             mass,
             renderable,
@@ -96,6 +114,9 @@ pub struct PhysicsPipeline {
     reference_gradients_buffer: wgpu::Buffer,
     reference_kernel_weights_buffer: wgpu::Buffer,
     reference_particles_buffer: wgpu::Buffer,
+    sim_params_buffer: wgpu::Buffer,
+    interaction_buffer: wgpu::Buffer,
+    sim_params: SimParams,
     particle_count: u32,
     use_alt: bool,
     debugger: BufferDebug,
@@ -111,7 +132,7 @@ impl PhysicsPipeline {
             label: Some("Physics pipeline"),
             module: &shader,
             entry_point: None,
-            layout: None, // TODO: do we need global bind for compute?
+            layout: None,
             compilation_options: Default::default(),
             cache: Default::default(),
         });
@@ -127,7 +148,6 @@ impl PhysicsPipeline {
             .map(|(((vertex, neighbors), density), L)| Particle::new(
                 vertex.position,
                 vertex.velocity,
-                Vector3::new(0.0, 0.0, 1.0),
                 vertex.mass,
                 *density,
                 vertex.renderable as u32,
@@ -146,7 +166,6 @@ impl PhysicsPipeline {
             .map(|(((vertex, neighbors), density), L)| Particle::new(
                 vertex.position,
                 vertex.velocity,
-                Vector3::new(0.0, 0.0, 1.0),
                 vertex.mass,
                 *density,
                 vertex.renderable as u32,
@@ -155,13 +174,13 @@ impl PhysicsPipeline {
                 *L,
             ))
             .collect::<Vec<_>>();
-        
+
         let reference_gradients: Vec<ReferenceGradient> = cube.reference_gradients
             .into_iter()
             .flatten()
             .map(|gradient| ReferenceGradient::new(gradient.data.0[0]))
             .collect();
-        
+
         let reference_kernel_weights: Vec<f32> = cube.reference_kernel_weights
             .into_iter()
             .flatten()
@@ -169,6 +188,21 @@ impl PhysicsPipeline {
 
         let out = current_particles.clone();
         let particle_count = current_particles.len() as u32;
+        let grid_n = (particle_count as f32).cbrt().round() as u32;
+
+        let (ref_min, ref_max) = reference_bounds(&cube.reference.vertices);
+
+        let sim_params = SimParams {
+            ray_origin: [0.0; 3],
+            mouse_pressed: 0,
+            ray_end: [0.0, 0.0, 1.0],
+            grid_n,
+            ref_min,
+            _pad0: 0,
+            ref_max,
+            _pad1: 0,
+        };
+
         let particle_usage =
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::VERTEX;
 
@@ -197,6 +231,18 @@ impl PhysicsPipeline {
             contents: bytemuck::cast_slice(&current_particles),
             usage: particle_usage,
         });
+        let sim_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Sim params buffer"),
+            contents: bytemuck::cast_slice(&[sim_params]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        });
+        let interaction_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Interaction state buffer"),
+            contents: bytemuck::cast_slice(&[InteractionState {
+                selected_face: -1,
+            }]),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -221,6 +267,14 @@ impl PhysicsPipeline {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: sim_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: interaction_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -249,19 +303,30 @@ impl PhysicsPipeline {
                     binding: 4,
                     resource: current_particles_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: sim_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: interaction_buffer.as_entire_binding(),
+                },
             ],
         });
 
         let buffer_size = reference_particles_buffer.size();
-        Self { 
-            pipeline, 
-            output_buffer, 
+        Self {
+            pipeline,
+            output_buffer,
             bind_group,
             alt_bind_group,
             current_particles_buffer,
             reference_gradients_buffer,
             reference_kernel_weights_buffer,
             reference_particles_buffer,
+            sim_params_buffer,
+            interaction_buffer,
+            sim_params,
             particle_count,
             use_alt: false,
             debugger: BufferDebug::new(device, buffer_size),
@@ -270,17 +335,24 @@ impl PhysicsPipeline {
 
     pub fn update(
         &mut self,
-        _queue: &wgpu::Queue,
-        _start: Point3<f32>,
-        _end: Point3<f32>,
-        _color: [f32; 3],
+        queue: &wgpu::Queue,
+        start: Point3<f32>,
+        end: Point3<f32>,
+        mouse_pressed: bool,
     ) {
-       todo!();
+        self.sim_params.ray_origin = [start.x, start.y, start.z];
+        self.sim_params.ray_end = [end.x, end.y, end.z];
+        self.sim_params.mouse_pressed = u32::from(mouse_pressed);
+        queue.write_buffer(
+            &self.sim_params_buffer,
+            0,
+            bytemuck::cast_slice(&[self.sim_params]),
+        );
     }
 
     pub fn compute(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
-        // self.debugger
-        //     .log::<Particle>(_device, _queue, &self.output_buffer);
+        self.debugger
+            .log::<Particle>(_device, _queue, &self.output_buffer);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.pipeline);
         if self.use_alt {
@@ -302,7 +374,20 @@ impl PhysicsPipeline {
     }
 }
 
-/// Eq (11) in https://arxiv.org/pdf/2009.06944
+fn reference_bounds(vertices: &[PhysicsVertex]) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in vertices {
+        let p = [v.position.x, v.position.y, v.position.z];
+        for i in 0..3 {
+            min[i] = min[i].min(p[i]);
+            max[i] = max[i].max(p[i]);
+        }
+    }
+    (min, max)
+}
+
+// Eq (11) in https://arxiv.org/pdf/2009.06944
 fn compute_densities(
     vertices: &[PhysicsVertex],
     kernel: &CubicKernel,
@@ -322,7 +407,6 @@ fn compute_densities(
     }
     densities
 }
-
 
 fn neighbor_sum<F, T>(
     delta: F,

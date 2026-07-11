@@ -335,7 +335,7 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
-        let m = 20;
+        let m = 10;
         let kernel = CubicKernel::new(1.0 / (m - 1) as f32);
         let cube = Cube::new(m, 1.0 / m as f32, &kernel);
         let instances = cube.to_particle_renderable();
@@ -495,21 +495,12 @@ impl State {
             self.config.height as f32,
         );
         self.ray_pipeline.update(&self.queue, ray.start, ray.end, [0.2, 1.0, 0.2]);
-        let hovered_face = self.object.hovered_face_from_ray(
-            (ray.start.x, ray.start.y, ray.start.z),
-            (ray.end.x, ray.end.y, ray.end.z),
+        self.physics_pipeline.update(
+            &self.queue,
+            ray.start,
+            ray.end,
+            self.mouse_state.is_pressed,
         );
-        // self.object.update(&self.mouse_state, hovered_face.clone(), &ray);
-        // match RENDER_MODE {
-        //     RenderMode::Particles => {
-        //         let (vertices, _) = self.object.to_renderable_with_hover(hovered_face);
-        //         self.render_pipeline.update(&self.queue, &vertices);
-        //     },
-        //     RenderMode::Mesh => {
-        //         let (vertices, _) = self.object.to_renderable_with_hover(hovered_face);
-        //         self.mesh_pipeline.update(&self.queue, &vertices);
-        //     }
-        // }
     }
 }
 

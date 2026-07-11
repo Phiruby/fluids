@@ -9,15 +9,36 @@ struct Particle {
     neighbors: array<u32, 27>, // NOTE: assuming max 27 neighbors
     L: mat3x3<f32>,
 }
+
+struct SimParams {
+    ray_origin: vec3<f32>,
+    mouse_pressed: u32,
+    ray_end: vec3<f32>,
+    grid_n: u32,
+    ref_min: vec3<f32>,
+    ref_max: vec3<f32>,
+}
+
+struct InteractionState {
+    selected_face: i32,
+}
+
 const DT: f32 = 0.002;
 const VELOCITY_DAMPING: f32 = 0.995;
 const PENALTY_ALPHA: f32 = 0.9;
+const STRETCH_FORCE: f32 = 60.0;
+const STRETCH_DAMPING: f32 = 8.0;
+const MAX_STRETCH: f32 = 5.05;
+const COLOR_DEFAULT: vec3<f32> = vec3<f32>(0.72, 0.45, 0.95);
+const COLOR_HOVER: vec3<f32> = vec3<f32>(1.0, 0.85, 0.15);
 
 @group(0) @binding(0) var<storage, read> reference_particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> current_particles: array<Particle>;
 @group(0) @binding(2) var<storage, read> reference_gradients: array<vec3<f32>>;
 @group(0) @binding(3) var<storage, read> reference_kernel_weights: array<f32>;
 @group(0) @binding(4) var<storage, read_write> dst_particles: array<Particle>;
+@group(0) @binding(5) var<uniform> params: SimParams;
+@group(0) @binding(6) var<storage, read_write> interaction: InteractionState;
 
 // For debugging (everything was NaN!)
 fn is_finite(x: f32) -> bool {
@@ -38,30 +59,277 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
+    let n = params.grid_n;
+    let hovered = find_hovered_face(n);
+    var selected = interaction.selected_face;
+    if params.mouse_pressed != 0u {
+        if selected < 0 {
+            selected = hovered;
+        }
+    } else {
+        selected = -1;
+    }
+    if particle_index == 0u {
+        interaction.selected_face = selected;
+    }
+
     var particle = current_particles[particle_index];
-    let force = compute_force(particle_index);
+    var force = compute_force(particle_index);
     let penalty_force = compute_penalty_force(
         particle_index,
         initial_deformation_tensor_estimate(particle_index),
     );
+    force += penalty_force;
+
+    if selected >= 0 {
+        let face = u32(selected);
+        if particle_on_face(particle_index, face, n) {
+            force += face_stretch_force(particle, face, stretch_target(face, n));
+        }
+    }
 
     if is_finite_vec3(force)
-        && is_finite_vec3(penalty_force)
         && is_finite_vec3(particle.velocity)
         && is_finite_vec3(particle.position)
         && is_finite(particle.mass)
         && particle.mass != 0.0
     {
-        particle.velocity += (force + penalty_force) * DT / particle.mass;
+        particle.velocity += force * DT / particle.mass;
         particle.velocity *= VELOCITY_DAMPING;
         particle.position += particle.velocity * DT;
     }
+
+    if selected >= 0 {
+        let opposite = opposite_face(u32(selected));
+        if particle_on_face(particle_index, opposite, n) {
+            pin_particle_axis(&particle, particle_index, opposite);
+        }
+    }
+
+    let hover_hit = hovered >= 0 && particle_on_face(particle_index, u32(hovered), n);
+    let selected_hit = selected >= 0 && particle_on_face(particle_index, u32(selected), n);
+    if hover_hit || selected_hit {
+        particle.normal = COLOR_HOVER;
+    } else {
+        particle.normal = COLOR_DEFAULT;
+    }
+
     dst_particles[particle_index] = particle;
 }
 
-
 fn neighbor_count(i: u32) -> u32 {
     return min(current_particles[i].nneighbors, 27u);
+}
+
+fn grid_ijk(idx: u32, n: u32) -> vec3<u32> {
+    let n2 = n * n;
+    return vec3<u32>(idx / n2, (idx / n) % n, idx % n);
+}
+
+fn particle_on_face(idx: u32, face: u32, n: u32) -> bool {
+    let ijk = grid_ijk(idx, n);
+    switch face {
+        case 0u: { return ijk.x == 0u; }
+        case 1u: { return ijk.y == 0u; }
+        case 2u: { return ijk.z == 0u; }
+        case 3u: { return ijk.x == n - 1u; }
+        case 4u: { return ijk.y == n - 1u; }
+        case 5u: { return ijk.z == n - 1u; }
+        default: { return false; }
+    }
+}
+
+fn face_axis(face: u32) -> u32 {
+    return face % 3u;
+}
+
+fn opposite_face(face: u32) -> u32 {
+    return (face + 3u) % 6u;
+}
+
+fn face_normal(face: u32) -> vec3<f32> {
+    switch face {
+        case 0u: { return vec3<f32>(-1.0, 0.0, 0.0); }
+        case 1u: { return vec3<f32>(0.0, -1.0, 0.0); }
+        case 2u: { return vec3<f32>(0.0, 0.0, -1.0); }
+        case 3u: { return vec3<f32>(1.0, 0.0, 0.0); }
+        case 4u: { return vec3<f32>(0.0, 1.0, 0.0); }
+        default: { return vec3<f32>(0.0, 0.0, 1.0); }
+    }
+}
+
+fn vec_component(v: vec3<f32>, axis: u32) -> f32 {
+    switch axis {
+        case 0u: { return v.x; }
+        case 1u: { return v.y; }
+        default: { return v.z; }
+    }
+}
+
+fn face_component(v: vec3<f32>, face: u32) -> f32 {
+    return vec_component(v, face_axis(face));
+}
+
+fn face_vertex_index(face: u32, a: u32, b: u32, n: u32) -> u32 {
+    let n2 = n * n;
+    switch face {
+        case 0u: { return a * n + b; }                         // i = 0
+        case 1u: { return a * n2 + b; }                        // j = 0
+        case 2u: { return a * n2 + b * n; }                    // k = 0
+        case 3u: { return (n - 1u) * n2 + a * n + b; }         // i = n-1
+        case 4u: { return a * n2 + (n - 1u) * n + b; }         // j = n-1
+        default: { return a * n2 + b * n + (n - 1u); }         // k = n-1
+    }
+}
+
+struct FaceBounds {
+    center: vec3<f32>,
+    min_p: vec3<f32>,
+    max_p: vec3<f32>,
+}
+
+// Face bounds are computed as:
+// face center +/- extent
+fn face_bounds(face: u32, n: u32) -> FaceBounds {
+    var sum = vec3<f32>(0.0);
+    var min_p = vec3<f32>(1e20);
+    var max_p = vec3<f32>(-1e20);
+    for (var a = 0u; a < n; a++) {
+        for (var b = 0u; b < n; b++) {
+            let p = current_particles[face_vertex_index(face, a, b, n)].position;
+            sum += p;
+            min_p = min(min_p, p);
+            max_p = max(max_p, p);
+        }
+    }
+    let center = sum / f32(n * n);
+    let half = max(max_p - min_p, vec3<f32>(1e-4)) * 0.5;
+    return FaceBounds(center, center - half, center + half);
+}
+
+fn face_center(face: u32, n: u32) -> vec3<f32> {
+    return face_bounds(face, n).center;
+}
+
+fn cube_center(n: u32) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var face = 0u; face < 6u; face++) {
+        sum += face_center(face, n);
+    }
+    return sum / 6.0;
+}
+
+fn point_in_aabb(p: vec3<f32>, min_p: vec3<f32>, max_p: vec3<f32>) -> bool {
+    return all(p >= min_p) && all(p <= max_p);
+}
+
+// First check if the face plane intersects the ray. Then perform
+// face bound checks
+fn ray_intersect_face_t(origin: vec3<f32>, dir: vec3<f32>, face: u32, n: u32) -> f32 {
+    let bounds = face_bounds(face, n);
+    let axis = face_axis(face);
+    let coord = vec_component(bounds.center, axis);
+    let denom = vec_component(dir, axis);
+    if abs(denom) < 1e-6 {
+        return -1.0;
+    }
+    let t = (coord - vec_component(origin, axis)) / denom;
+    if t <= 0.0 {
+        return -1.0;
+    }
+    let hit = origin + dir * t;
+    if !point_in_aabb(hit, bounds.min_p, bounds.max_p) {
+        return -1.0;
+    }
+    return t;
+}
+
+fn find_hovered_face(n: u32) -> i32 {
+    let origin = params.ray_origin;
+    let delta = params.ray_end - params.ray_origin;
+    let len = length(delta);
+    if len < 1e-6 {
+        return -1;
+    }
+    let dir = delta / len;
+    var best_face: i32 = -1;
+    var best_t = 1e20;
+    for (var face = 0u; face < 6u; face++) {
+        let t = ray_intersect_face_t(origin, dir, face, n);
+        if t > 0.0 && t < best_t {
+            best_t = t;
+            best_face = i32(face);
+        }
+    }
+    return best_face;
+}
+
+// Solves the optimization problem:
+// min_{u, t} || ray_origin + t * ray_dir - u * axis ||^2
+// and then projects ray_orgin + t * ray_dir onto axis after we
+// solved for t
+fn project_ray_to_axis(origin: vec3<f32>, end: vec3<f32>, axis: vec3<f32>) -> vec3<f32> {
+    let e = vec3<f32>(1.0, 1.0, 1.0);
+    let axis_n = normalize(axis);
+    let sum_r0 = dot(e, origin);
+    let dir = normalize(end - origin);
+    let sum_r = dot(e, dir);
+    let sum_v = dot(e, axis_n);
+    let u = (sum_r0 + sum_r0 * sum_r) / (1.0 + sum_r * sum_v);
+    let t = max(sum_r0 - u * sum_v, 0.0);
+    let closest = origin + dir * t;
+    return axis_n * dot(closest, axis_n);
+}
+
+fn clamp_stretch_target(face: u32, target_num: f32) -> f32 {
+    let axis = face_axis(face);
+    let mn = vec_component(params.ref_min, axis);
+    let mx = vec_component(params.ref_max, axis);
+    let extra = (mx - mn) * (MAX_STRETCH - 1.0);
+    if face <= 2u {
+        return clamp(target_num, mn - extra, mn);
+    }
+    return clamp(target_num, mx, mx + extra);
+}
+
+fn stretch_target(face: u32, n: u32) -> f32 {
+    let normal = face_normal(face);
+    let center = cube_center(n);
+    let projected = project_ray_to_axis(params.ray_origin, params.ray_end, normal) - center;
+    return clamp_stretch_target(face, face_component(projected, face));
+}
+
+fn face_stretch_force(particle: Particle, face: u32, target_axis: f32) -> vec3<f32> {
+    let axis = face_axis(face);
+    let current_axis = vec_component(particle.position, axis);
+    let velocity_axis = vec_component(particle.velocity, axis);
+    let force_scalar = STRETCH_FORCE * (target_axis - current_axis) - STRETCH_DAMPING * velocity_axis;
+    var force = vec3<f32>(0.0);
+    switch axis {
+        case 0u: { force.x = force_scalar; }
+        case 1u: { force.y = force_scalar; }
+        default: { force.z = force_scalar; }
+    }
+    return force;
+}
+
+fn pin_particle_axis(particle: ptr<function, Particle>, idx: u32, face: u32) {
+    let axis = face_axis(face);
+    let ref_p = reference_particles[idx].position;
+    switch axis {
+        case 0u: {
+            (*particle).position.x = ref_p.x;
+            (*particle).velocity.x = 0.0;
+        }
+        case 1u: {
+            (*particle).position.y = ref_p.y;
+            (*particle).velocity.y = 0.0;
+        }
+        default: {
+            (*particle).position.z = ref_p.z;
+            (*particle).velocity.z = 0.0;
+        }
+    }
 }
 
 fn initial_deformation_tensor_estimate(
