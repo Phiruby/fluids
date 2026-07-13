@@ -12,7 +12,7 @@ use winit::{
     window::Window,
 };
 use crate::texture::Texture;
-use crate::physics::{Cube, CubicKernel};
+use crate::physics::{Cube, CubicKernel, FluidSim};
 use crate::camera::CameraController;
 use crate::graphics::{MeshRenderPipeline, RenderPipeline, RayPipeline};
 use crate::graphics::compute::PhysicsPipeline;
@@ -151,6 +151,7 @@ pub struct State {
     #[allow(unused)]
     object: Cube,
     mouse_state: MouseState,
+    fluid_sim: FluidSim,
 }
 
 #[repr(C)]
@@ -355,7 +356,7 @@ impl State {
         let ray_pipeline = RayPipeline::new(&device, &camera_bind_group_layout, config.format);
         let physics_pipeline = PhysicsPipeline::new(&device, Cube::new(m, 1.0 / m as f32, &kernel));
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
-
+        let fluid_sim = FluidSim::new(&device, (m * m * m) as u32);
         Ok(Self { 
             surface,
             device,
@@ -375,6 +376,7 @@ impl State {
             depth_texture,
             object: cube,
             mouse_state: MouseState::new(),
+            fluid_sim,
         })
     }
 

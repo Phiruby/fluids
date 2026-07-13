@@ -1,4 +1,4 @@
-mod spatialhash;
+mod fluids;
 use crate::Vertex;
 use nalgebra::{Matrix3, Point3, Vector3};
 use std::collections::HashSet;
@@ -8,6 +8,9 @@ use bvh::bounding_hierarchy::{BHShape, BoundingHierarchy};
 use bvh::bvh::Bvh;
 use bvh::ray::Ray as BvhRay;
 use crate::{MouseState, Ray};
+
+pub use fluids::FluidSim;
+
 const DT: f32 = 0.002;
 const VELOCITY_DAMPING: f32 = 0.995;
 const STRETCH_FORCE: f32 = 60.0;
