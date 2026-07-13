@@ -48,10 +48,13 @@ pub struct SpatialHashGPU {
     histogram: wgpu::ComputePipeline,
     prefix: wgpu::ComputePipeline,
     scatter: wgpu::ComputePipeline,
+    reset_hash_offsets: wgpu::ComputePipeline,
+    hash_offsets: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     /// One uniform buffer per radix pass (avoids overwrite-before-submit).
     uniforms: [wgpu::Buffer; RADIX_PASSES],
     histogram_buf: wgpu::Buffer,
+    hash_offsets_buf: wgpu::Buffer,
     sorted: wgpu::Buffer,
     max_particles: u32,
     buffer_debug: BufferDebug,
@@ -104,6 +107,16 @@ impl SpatialHashGPU {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -115,6 +128,8 @@ impl SpatialHashGPU {
         let histogram = pipeline(device, &pipeline_layout, &module, "histogram_shader");
         let prefix = pipeline(device, &pipeline_layout, &module, "prefix_sum_shader");
         let scatter = pipeline(device, &pipeline_layout, &module, "scatter_shader");
+        let reset_hash_offsets = pipeline(device, &pipeline_layout, &module, "clear_hash_offsets");
+        let hash_offsets = pipeline(device, &pipeline_layout, &module, "build_offsets");
 
         let max_wgs = (max_particles + WG_SIZE - 1) / WG_SIZE;
         let uniforms = std::array::from_fn(|i| {
@@ -131,25 +146,72 @@ impl SpatialHashGPU {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let hash_offsets_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hash offsets"),
+            size: 27 * 8192 * 8 * 2 as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let sorted = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sorted particles"),
             size: max_particles as u64 * std::mem::size_of::<Particle>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        Self { hash, histogram, prefix, scatter, layout, uniforms, histogram_buf, sorted, max_particles, buffer_debug: BufferDebug::new(device, max_particles as u64 * std::mem::size_of::<Particle>() as u64) }
+        Self {
+            hash,
+            histogram,
+            prefix,
+            scatter,
+            reset_hash_offsets,
+            hash_offsets,
+            layout,
+            uniforms,
+            histogram_buf,
+            hash_offsets_buf,
+            sorted,
+            max_particles,
+            buffer_debug: BufferDebug::new(
+                device,
+                max_particles as u64 * std::mem::size_of::<Particle>() as u64,
+            ),
+        }
     }
 
-    fn bind(&self, device: &wgpu::Device, src: &wgpu::Buffer, dst: &wgpu::Buffer, uniform: &wgpu::Buffer) -> wgpu::BindGroup {
+    fn bind(
+        &self,
+        device: &wgpu::Device,
+        src: &wgpu::Buffer,
+        dst: &wgpu::Buffer,
+        uniform: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: src.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.histogram_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: dst.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: src.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.histogram_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: dst.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.hash_offsets_buf.as_entire_binding(),
+                },
             ],
         })
     }
@@ -166,11 +228,15 @@ impl SpatialHashGPU {
         let wgs = (num_particles + WG_SIZE - 1) / WG_SIZE;
 
         for (i, buf) in self.uniforms.iter().enumerate() {
-            queue.write_buffer(buf, 0, bytemuck::bytes_of(&SortUniform {
-                iteration: i as u32,
-                num_particles,
-                _pad: [0; 2],
-            }));
+            queue.write_buffer(
+                buf,
+                0,
+                bytemuck::bytes_of(&SortUniform {
+                    iteration: i as u32,
+                    num_particles,
+                    _pad: [0; 2],
+                }),
+            );
         }
 
         let hash_bg = self.bind(device, particles, &self.sorted, &self.uniforms[0]);
@@ -207,7 +273,9 @@ pub struct FluidSim {
 
 impl FluidSim {
     pub fn new(device: &wgpu::Device, max_particles: u32) -> Self {
-        Self { spatial_hash: SpatialHashGPU::new(device, max_particles) }
+        Self {
+            spatial_hash: SpatialHashGPU::new(device, max_particles),
+        }
     }
 
     pub fn sort_particles(
@@ -218,6 +286,7 @@ impl FluidSim {
         particles: &wgpu::Buffer,
         num_particles: u32,
     ) {
-        self.spatial_hash.sort(device, queue, encoder, particles, num_particles);
+        self.spatial_hash
+            .sort(device, queue, encoder, particles, num_particles);
     }
 }

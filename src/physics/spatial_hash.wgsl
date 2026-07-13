@@ -16,11 +16,13 @@ struct SortUniform {
 @group(0) @binding(1) var<storage, read_write> histogram: array<u32>;
 @group(0) @binding(2) var<uniform> params: SortUniform;
 @group(0) @binding(3) var<storage, read_write> sorted_particles: array<Particle>;
+// idx i stores [start, end) for hash value i
+@group(0) @binding(4) var<storage, read_write> hash_offsets: array<vec2<u32>, 27 * HASHTABLE_SIZE>;
 
 const RADIX_BUCKETS: u32 = 16u;
 const WG_SIZE: u32 = 256u;
 const CELL_SIZE: f32 = 0.1;
-const HASHTABLE_SIZE: u32 = 1024u * 1024u * 1024u;
+const HASHTABLE_SIZE: u32 = 8192u;
 
 fn cell_index(position: vec3<f32>) -> vec3<u32> {
     return vec3<u32>(
@@ -120,3 +122,28 @@ fn scatter_shader(
         sorted_particles[bucket_base[d] + rank] = particles[gid.x];
     }
 }
+
+@compute
+@workgroup_size(256)
+fn clear_hash_offsets(@builtin(global_invocation_id) gid: vec3<u32>) {
+  hash_offsets[gid.x] = vec2<u32>(0u, 0u);
+}
+
+@compute
+@workgroup_size(256)
+fn build_offsets(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= params.num_particles) { return; }
+  let hash = sorted_particles[i].cell_hash;
+
+  // beggining of hash
+  if (i == 0u || sorted_particles[i - 1u].cell_hash != hash) {
+      hash_offsets[hash].x = i;
+  }
+
+  // end of hash section
+  if (i == params.num_particles - 1 || sorted_particles[i + 1u].cell_hash != hash) {
+      hash_offsets[hash].y = i + 1u;
+  }
+}
+
