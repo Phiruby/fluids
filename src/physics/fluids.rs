@@ -4,6 +4,7 @@ use wgpu::util::DeviceExt;
 const WG_SIZE: u32 = 256;
 const RADIX_BUCKETS: u32 = 16;
 const RADIX_PASSES: usize = 8;
+const HASHTABLE_SIZE: u64 = 8192;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -148,7 +149,7 @@ impl SpatialHashGPU {
         });
         let hash_offsets_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("hash offsets"),
-            size: 27 * 8192 * 8 * 2 as u64,
+            size: 27 * HASHTABLE_SIZE * 8 * 2 as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -264,6 +265,14 @@ impl SpatialHashGPU {
             pass.set_pipeline(&self.scatter);
             pass.dispatch_workgroups(wgs, 1, 1);
         }
+        // calculate offsets for sorted hash
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        let (src, dst) = (particles, &self.sorted);
+        let bg = self.bind(device, src, dst, &self.uniforms[7]);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.set_pipeline(&self.hash_offsets);
+        let wgs = 27 * HASHTABLE_SIZE / (WG_SIZE as u64);
+        pass.dispatch_workgroups(wgs as u32, 1, 1);
     }
 }
 
