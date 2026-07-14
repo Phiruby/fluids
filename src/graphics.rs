@@ -1,11 +1,65 @@
-use wgpu;
 use crate::texture::Texture;
+use wgpu;
 
-mod pipelines;
 pub mod compute;
-pub use pipelines::{MeshRenderPipeline, RenderPipeline, RayPipeline};
-use std::fmt::Debug;
+mod pipelines;
 use flume::bounded;
+pub use pipelines::{MeshRenderPipeline, RayPipeline, RenderPipeline};
+use std::fmt::Debug;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct Vertex {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+    pub normal: [f32; 3],
+}
+
+impl Vertex {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: 224,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            // NOTE the offsets: they're from compute shader's `Particle` struct
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 52,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+            ],
+        }
+    }
+
+    pub(crate) fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
+        }
+    }
+}
 
 pub(in crate::graphics) struct PipelineInfo<'a> {
     shader: &'a wgpu::ShaderModule,
@@ -148,3 +202,4 @@ impl BufferDebug {
         dbg!(self.read::<T>(device, queue, buffer, n));
     }
 }
+

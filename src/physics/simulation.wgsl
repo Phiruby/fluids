@@ -7,6 +7,8 @@ struct Particle {
     rest_density: f32,
     mass: f32,
     cell_hash: u32,
+    // 1 if not boundary, 0 if boundary particle
+    boundary: u32
 }
 
 // NOTE: this should be synced with spatial_hash.wgsl
@@ -127,6 +129,7 @@ fn simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pressure_acceleration = pressure_gradient(gid.x);
   let dv = (viscosity + pressure_acceleration + vec3<f32>(0.0, 0.0, -9.81)) * DT;
   var particle: Particle = particles[gid.x];
+  // fyi: multing by boundary so that boundary particles do not move
   particle.velocity += dv;
   particle.position += particle.velocity * DT;
   output_particles[gid.x] = particle;

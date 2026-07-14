@@ -1,7 +1,13 @@
-mod texture;
-mod physics;
 mod camera;
 mod graphics;
+mod physics;
+mod texture;
+use crate::camera::CameraController;
+use crate::graphics::compute::PhysicsPipeline;
+use crate::graphics::{MeshRenderPipeline, RayPipeline, RenderPipeline};
+use crate::physics::{Cube, CubicKernel, FluidSim};
+use crate::texture::Texture;
+use cgmath::SquareMatrix;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -11,20 +17,14 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
-use crate::texture::Texture;
-use crate::physics::{Cube, CubicKernel, FluidSim};
-use crate::camera::CameraController;
-use crate::graphics::{MeshRenderPipeline, RenderPipeline, RayPipeline};
-use crate::graphics::compute::PhysicsPipeline;
-use cgmath::SquareMatrix;
 
+use bytemuck;
+use cgmath;
+use nalgebra::Vector3;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::EventLoopExtWebSys;
-use bytemuck;
-use cgmath;
-use nalgebra::Vector3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RenderMode {
@@ -120,12 +120,8 @@ pub(crate) struct Camera {
 impl Camera {
     fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
-        let projection = cgmath::perspective(
-            cgmath::Deg(self.fovy),
-            self.aspect,
-            self.znear,
-            self.zfar,
-        );
+        let projection =
+            cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
         return OPENGL_TO_WGPU_MATRIX * projection * view;
     }
 }
@@ -136,7 +132,6 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
     window: Arc<Window>,
-    render_pipeline: RenderPipeline,
     mesh_pipeline: MeshRenderPipeline,
     ray_pipeline: RayPipeline,
     physics_pipeline: PhysicsPipeline,
@@ -171,80 +166,19 @@ impl CameraUniform {
         self.view_projection = camera.build_view_projection_matrix().into();
     }
 }
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-    normal: [f32; 3],
-}
-
-impl Vertex {
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: 224, 
-            step_mode: wgpu::VertexStepMode::Vertex,
-            // NOTE the offsets: they're from compute shader's `Particle` struct
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 32,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 52,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Uint32,
-                },
-            ],
-        }
-    }
-
-    pub(crate) fn set_color(&mut self, color: [f32; 3]) {
-        self.color = color;
-    }
-
-    pub(crate) fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
-        }
-    }
-}
-
 impl State {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor {
-                #[cfg(not(target_arch = "wasm32"))]
-                backends: wgpu::Backends::PRIMARY,
-                #[cfg(target_arch = "wasm32")]
-                backends: wgpu::Backends::GL,
-                flags: Default::default(),
-                memory_budget_thresholds: Default::default(),
-                backend_options: Default::default(),
-                display: None
-            }
-        );
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            #[cfg(not(target_arch = "wasm32"))]
+            backends: wgpu::Backends::PRIMARY,
+            #[cfg(target_arch = "wasm32")]
+            backends: wgpu::Backends::GL,
+            flags: Default::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: None,
+        });
         let surface = instance.create_surface(window.clone()).unwrap();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -253,7 +187,7 @@ impl State {
                 force_fallback_adapter: false,
             })
             .await?;
-        
+
         let device_limits = adapter.limits();
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -261,7 +195,8 @@ impl State {
         #[cfg(target_arch = "wasm32")]
         let mut required_limits = wgpu::Limits::downlevel_webgl2_defaults();
 
-        required_limits.max_storage_buffer_binding_size = device_limits.max_storage_buffer_binding_size;
+        required_limits.max_storage_buffer_binding_size =
+            device_limits.max_storage_buffer_binding_size;
         required_limits.max_buffer_size = device_limits.max_buffer_size;
 
         let (device, queue) = adapter
@@ -271,16 +206,18 @@ impl State {
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 required_limits,
                 memory_hints: Default::default(),
-                trace: wgpu::Trace::Off
+                trace: wgpu::Trace::Off,
             })
             .await?;
         let surface_capabilities = surface.get_capabilities(&adapter);
 
-        let surface_format = surface_capabilities.formats.iter()
+        let surface_format = surface_capabilities
+            .formats
+            .iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_capabilities.formats[0]);
-        
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -303,17 +240,15 @@ impl State {
 
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_projection(&camera);
-        let camera_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Camera buffer"),
-                contents: bytemuck::cast_slice(&[camera_uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            }
-        );
-        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Camera bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Camera bind group layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
@@ -321,32 +256,21 @@ impl State {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
-                    count: None
-                },
-            ],
-        });
+                    count: None,
+                }],
+            });
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                }
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
             label: Some("camera_bind_group"),
         });
 
         let m = 10;
         let kernel = CubicKernel::new(1.0 / (m - 1) as f32);
         let cube = Cube::new(m, 1.0 / m as f32, &kernel);
-        let instances = cube.to_particle_renderable();
-        let render_pipeline = RenderPipeline::new(
-            &device,
-            &camera_bind_group_layout,
-            config.format,
-            0.2 / m as f32,
-            &instances,
-        );
         let mesh_pipeline = MeshRenderPipeline::new(
             &device,
             &camera_bind_group_layout,
@@ -357,14 +281,13 @@ impl State {
         let physics_pipeline = PhysicsPipeline::new(&device, Cube::new(m, 1.0 / m as f32, &kernel));
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
         let fluid_sim = FluidSim::new(&device, (m * m * m) as u32);
-        Ok(Self { 
+        Ok(Self {
             surface,
             device,
             queue,
             config,
             is_surface_configured: false,
             window,
-            render_pipeline,
             mesh_pipeline,
             ray_pipeline,
             physics_pipeline,
@@ -387,7 +310,8 @@ impl State {
             self.camera.aspect = width as f32 / height as f32;
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
-            self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "Depth texture");
+            self.depth_texture =
+                Texture::create_depth_texture(&self.device, &self.config, "Depth texture");
         }
     }
 
@@ -404,24 +328,29 @@ impl State {
                 surface_texture
             }
             wgpu::CurrentSurfaceTexture::Timeout
-             | wgpu::CurrentSurfaceTexture::Occluded
-             | wgpu::CurrentSurfaceTexture::Validation => {
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Validation => {
                 return Ok(());
-             }
-            
-             wgpu::CurrentSurfaceTexture::Lost => {
-                anyhow::bail!("Device lost");
-             }
+            }
 
-             _ => anyhow::bail!("Unknown error")
+            wgpu::CurrentSurfaceTexture::Lost => {
+                anyhow::bail!("Device lost");
+            }
+
+            _ => anyhow::bail!("Unknown error"),
         };
 
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Command encoder for rendering"),
-        });
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Command encoder for rendering"),
+            });
 
-        self.physics_pipeline.compute(&self.device, &self.queue, &mut encoder);
+        self.physics_pipeline
+            .compute(&self.device, &self.queue, &mut encoder);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -435,7 +364,7 @@ impl State {
                             r: 0.1,
                             g: 0.2,
                             b: 0.3,
-                            a: 1.0
+                            a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -452,11 +381,15 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            match RENDER_MODE {
-                RenderMode::Particles => self.render_pipeline.draw(&mut render_pass, &self.camera_bind_group),
-                RenderMode::Mesh => self.mesh_pipeline.draw(&mut render_pass, &self.camera_bind_group, &self.physics_pipeline.get_output_buffer()),
-            }
-            self.ray_pipeline.draw(&mut render_pass, &self.camera_bind_group);
+
+            self.mesh_pipeline.draw(
+                &mut render_pass,
+                &self.camera_bind_group,
+                &self.physics_pipeline.get_output_buffer(),
+            );
+
+            self.ray_pipeline
+                .draw(&mut render_pass, &self.camera_bind_group);
         }
 
         self.queue.submit([encoder.finish()]);
@@ -496,13 +429,10 @@ impl State {
             self.config.width as f32,
             self.config.height as f32,
         );
-        self.ray_pipeline.update(&self.queue, ray.start, ray.end, [0.2, 1.0, 0.2]);
-        self.physics_pipeline.update(
-            &self.queue,
-            ray.start,
-            ray.end,
-            self.mouse_state.is_pressed,
-        );
+        self.ray_pipeline
+            .update(&self.queue, ray.start, ray.end, [0.2, 1.0, 0.2]);
+        self.physics_pipeline
+            .update(&self.queue, ray.start, ray.end, self.mouse_state.is_pressed);
     }
 }
 
@@ -558,13 +488,15 @@ impl ApplicationHandler<State> for App {
             // proxy to send the results to the event loop
             if let Some(proxy) = self.proxy.take() {
                 wasm_bindgen_futures::spawn_local(async move {
-                    assert!(proxy
-                        .send_event(
-                            State::new(window)
-                                .await
-                                .expect("Unable to create canvas!!!")
-                        )
-                        .is_ok())
+                    assert!(
+                        proxy
+                            .send_event(
+                                State::new(window)
+                                    .await
+                                    .expect("Unable to create canvas!!!")
+                            )
+                            .is_ok()
+                    )
                 });
             }
         }
@@ -600,7 +532,7 @@ impl ApplicationHandler<State> for App {
             WindowEvent::RedrawRequested => {
                 state.update();
                 match state.render() {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => {
                         log::error!("{e:?}");
                         event_loop.exit();
@@ -616,7 +548,11 @@ impl ApplicationHandler<State> for App {
                     },
                 ..
             } => state.handle_key(event_loop, code, key_state.is_pressed()),
-            WindowEvent::MouseInput { state: button_state, button, .. } => {
+            WindowEvent::MouseInput {
+                state: button_state,
+                button,
+                ..
+            } => {
                 state.handle_mouse_button(button, button_state);
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -660,3 +596,4 @@ pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
 
     Ok(())
 }
+

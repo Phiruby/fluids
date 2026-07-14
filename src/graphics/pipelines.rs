@@ -1,5 +1,5 @@
-use crate::graphics::{create_pipeline, PipelineInfo, PipelineState};
-use crate::Vertex;
+use crate::graphics::Vertex;
+use crate::graphics::{PipelineInfo, PipelineState, create_pipeline};
 use cgmath::Point3;
 use wgpu::util::DeviceExt;
 
@@ -61,19 +61,42 @@ impl LineVertex {
 
 fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
     let vertices = [
-        ParticleMeshVertex { position: [-radius, -radius, -radius], normal: [-0.57735026, -0.57735026, -0.57735026] },
-        ParticleMeshVertex { position: [ radius, -radius, -radius], normal: [ 0.57735026, -0.57735026, -0.57735026] },
-        ParticleMeshVertex { position: [ radius,  radius, -radius], normal: [ 0.57735026,  0.57735026, -0.57735026] },
-        ParticleMeshVertex { position: [-radius,  radius, -radius], normal: [-0.57735026,  0.57735026, -0.57735026] },
-        ParticleMeshVertex { position: [-radius, -radius,  radius], normal: [-0.57735026, -0.57735026,  0.57735026] },
-        ParticleMeshVertex { position: [ radius, -radius,  radius], normal: [ 0.57735026, -0.57735026,  0.57735026] },
-        ParticleMeshVertex { position: [ radius,  radius,  radius], normal: [ 0.57735026,  0.57735026,  0.57735026] },
-        ParticleMeshVertex { position: [-radius,  radius,  radius], normal: [-0.57735026,  0.57735026,  0.57735026] },
+        ParticleMeshVertex {
+            position: [-radius, -radius, -radius],
+            normal: [-0.57735026, -0.57735026, -0.57735026],
+        },
+        ParticleMeshVertex {
+            position: [radius, -radius, -radius],
+            normal: [0.57735026, -0.57735026, -0.57735026],
+        },
+        ParticleMeshVertex {
+            position: [radius, radius, -radius],
+            normal: [0.57735026, 0.57735026, -0.57735026],
+        },
+        ParticleMeshVertex {
+            position: [-radius, radius, -radius],
+            normal: [-0.57735026, 0.57735026, -0.57735026],
+        },
+        ParticleMeshVertex {
+            position: [-radius, -radius, radius],
+            normal: [-0.57735026, -0.57735026, 0.57735026],
+        },
+        ParticleMeshVertex {
+            position: [radius, -radius, radius],
+            normal: [0.57735026, -0.57735026, 0.57735026],
+        },
+        ParticleMeshVertex {
+            position: [radius, radius, radius],
+            normal: [0.57735026, 0.57735026, 0.57735026],
+        },
+        ParticleMeshVertex {
+            position: [-radius, radius, radius],
+            normal: [-0.57735026, 0.57735026, 0.57735026],
+        },
     ];
     let indices = [
-        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
-        0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7,
-        0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4,
+        1, 5, 6, 1, 6, 2,
     ];
     (vertices, indices)
 }
@@ -248,13 +271,18 @@ impl RayPipeline {
         );
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Ray buffer"),
-            contents: bytemuck::cast_slice(&[LineVertex {
-                position: [0.0; 3],
-                color: [0.2, 1.0, 0.2],
-            }; 2]),
+            contents: bytemuck::cast_slice(
+                &[LineVertex {
+                    position: [0.0; 3],
+                    color: [0.2, 1.0, 0.2],
+                }; 2],
+            ),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
-        Self { pipeline, vertex_buffer }
+        Self {
+            pipeline,
+            vertex_buffer,
+        }
     }
 
     pub fn update(
@@ -265,8 +293,14 @@ impl RayPipeline {
         color: [f32; 3],
     ) {
         let verts = [
-            LineVertex { position: start.into(), color },
-            LineVertex { position: end.into(), color },
+            LineVertex {
+                position: start.into(),
+                color,
+            },
+            LineVertex {
+                position: end.into(),
+                color,
+            },
         ];
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&verts));
     }

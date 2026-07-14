@@ -1,25 +1,9 @@
 use crate::graphics::BufferDebug;
-use wgpu::util::DeviceExt;
-
+use crate::physics::FluidParticle;
 const WG_SIZE: u32 = 256;
 const RADIX_BUCKETS: u32 = 16;
 const RADIX_PASSES: usize = 8;
 const HASHTABLE_SIZE: u64 = 8192;
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Particle {
-    pub position: [f32; 3],
-    _pad0: u32,
-    pub velocity: [f32; 3],
-    _pad1: u32,
-    pub normal: [f32; 3],
-    pub density: f32,
-    pub rest_density: f32,
-    pub mass: f32,
-    pub cell_hash: u32,
-    _pad2: [u32; 2],
-}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -156,7 +140,7 @@ impl SpatialHashGPU {
         });
         let sorted = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sorted particles"),
-            size: max_particles as u64 * std::mem::size_of::<Particle>() as u64,
+            size: max_particles as u64 * std::mem::size_of::<FluidParticle>() as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
@@ -178,7 +162,7 @@ impl SpatialHashGPU {
             max_particles,
             buffer_debug: BufferDebug::new(
                 device,
-                max_particles as u64 * std::mem::size_of::<Particle>() as u64,
+                max_particles as u64 * std::mem::size_of::<FluidParticle>() as u64,
             ),
         }
     }
