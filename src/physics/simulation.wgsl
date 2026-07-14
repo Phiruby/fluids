@@ -59,7 +59,11 @@ fn neighbor_hashes(idx: u32) -> array<u32, 27> {
 // gradient w.r.t first input for cubic spline kernel
 fn kernel_gradient(i: u32, j: u32) -> vec3<f32> {
   let r = particles[i].position - particles[j].position;
+  // TODO: should be l2 norm, not l1
   let r_norm = dot(abs(r), vec3<f32>(1.0));
+  if (r_norm == 0.0) {
+    return vec3<f32>(0.0);
+  }
   let q = r_norm / CELL_SIZE;
   let partial_q_partial_x = vec3<f32>(
     r.x / (pow(CELL_SIZE, 2.0) * q),
@@ -127,10 +131,13 @@ fn simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let density = particles[gid.x].density;
   let viscosity = viscous_force(gid.x) / density;
   let pressure_acceleration = pressure_gradient(gid.x);
-  let dv = (viscosity + pressure_acceleration + vec3<f32>(0.0, 0.0, -9.81)) * DT;
+  let dv = (viscosity + pressure_acceleration + vec3<f32>(0.0, -9.81, 0.0)) * DT;
   var particle: Particle = particles[gid.x];
-  // fyi: multing by boundary so that boundary particles do not move
-  particle.velocity += dv;
-  particle.position += particle.velocity * DT;
+  // boundary == 0 marks a static particle: it still
+  // contributes to neighbors' density/pressure, but never integrates its own motion;
+  // multiplying by the flag keeps those particles pinned in place
+  let is_fluid = f32(particle.boundary);
+  particle.velocity += dv * is_fluid;
+  particle.position += particle.velocity * DT * is_fluid;
   output_particles[gid.x] = particle;
 }

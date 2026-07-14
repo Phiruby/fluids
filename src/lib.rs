@@ -5,7 +5,10 @@ mod texture;
 use crate::camera::CameraController;
 use crate::graphics::compute::PhysicsPipeline;
 use crate::graphics::{MeshRenderPipeline, RayPipeline, RenderPipeline};
-use crate::physics::{Cube, CubicKernel, FluidSim};
+use crate::physics::{
+    ContainerBoundary, Cube, CubicKernel, FluidParticle, FluidSim, assign_rest_densities,
+    fluid_cube,
+};
 use crate::texture::Texture;
 use cgmath::SquareMatrix;
 use std::sync::Arc;
@@ -33,6 +36,14 @@ enum RenderMode {
 }
 
 const RENDER_MODE: RenderMode = RenderMode::Mesh;
+
+const FLUID_GRID_N: usize = 8;
+const FLUID_SPACING: f32 = 0.05;
+const FLUID_PARTICLE_RADIUS: f32 = 0.02;
+const FLUID_ORIGIN: [f32; 3] = [-0.6, 0.2, -0.2];
+const FLUID_CELL_SIZE: f32 = 0.1;
+const FLUID_CONTAINER_LAYERS: usize = 5;
+const FLUID_WORKGROUP: usize = 256;
 
 pub(crate) struct Ray {
     start: cgmath::Point3<f32>,
@@ -134,6 +145,7 @@ pub struct State {
     window: Arc<Window>,
     mesh_pipeline: MeshRenderPipeline,
     ray_pipeline: RayPipeline,
+    fluid_pipeline: RenderPipeline,
     physics_pipeline: PhysicsPipeline,
     camera: Camera,
     camera_controller: CameraController,
@@ -280,7 +292,28 @@ impl State {
         let ray_pipeline = RayPipeline::new(&device, &camera_bind_group_layout, config.format);
         let physics_pipeline = PhysicsPipeline::new(&device, Cube::new(m, 1.0 / m as f32, &kernel));
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
-        let fluid_sim = FluidSim::new(&device, (m * m * m) as u32);
+
+        // Construct: fluid cube init bounded by a cube-boundary
+        let mut fluid_particles = fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
+        let container = ContainerBoundary {
+            top_left: nalgebra::Point3::new(-0.75, 0.05, -0.4),
+            bottom_right: nalgebra::Point3::new(-0.1, 0.7, 0.3),
+            nlayers: FLUID_CONTAINER_LAYERS,
+            spacing: FLUID_SPACING / 2.0,
+        };
+        let mut boundary_points = container.create_points(FLUID_CONTAINER_LAYERS);
+        fluid_particles.append(&mut boundary_points);
+        assign_rest_densities(&mut fluid_particles, &CubicKernel::new(FLUID_CELL_SIZE));
+        let padded_len = fluid_particles.len().next_multiple_of(FLUID_WORKGROUP);
+        fluid_particles.resize(padded_len, FluidParticle::inert());
+
+        let fluid_sim = FluidSim::new(&device, &fluid_particles);
+        let fluid_pipeline = RenderPipeline::new(
+            &device,
+            &camera_bind_group_layout,
+            config.format,
+            FLUID_PARTICLE_RADIUS,
+        );
         Ok(Self {
             surface,
             device,
@@ -290,6 +323,7 @@ impl State {
             window,
             mesh_pipeline,
             ray_pipeline,
+            fluid_pipeline,
             physics_pipeline,
             camera,
             camera_controller: CameraController::new(),
@@ -352,6 +386,9 @@ impl State {
         self.physics_pipeline
             .compute(&self.device, &self.queue, &mut encoder);
 
+        self.fluid_sim
+            .step(&self.device, &self.queue, &mut encoder);
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render pass"),
@@ -386,6 +423,13 @@ impl State {
                 &mut render_pass,
                 &self.camera_bind_group,
                 &self.physics_pipeline.get_output_buffer(),
+            );
+
+            self.fluid_pipeline.draw(
+                &mut render_pass,
+                &self.camera_bind_group,
+                self.fluid_sim.particle_buffer(),
+                self.fluid_sim.num_particles(),
             );
 
             self.ray_pipeline

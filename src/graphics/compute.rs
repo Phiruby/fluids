@@ -1,11 +1,10 @@
 use crate::graphics::BufferDebug;
 use crate::physics::Cube;
-use crate::physics::CubicKernel;
 use crate::physics::{ElasticSolidParticle, PhysicsVertex};
 use bytemuck;
 use cgmath::Point3;
-use std::ops::Add;
 use wgpu::util::DeviceExt;
+use crate::physics::{compute_densities, kernel_weight};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -338,41 +337,4 @@ fn reference_bounds(vertices: &[PhysicsVertex]) -> ([f32; 3], [f32; 3]) {
         }
     }
     (min, max)
-}
-
-// Eq (11) in https://arxiv.org/pdf/2009.06944
-fn compute_densities(
-    vertices: &[PhysicsVertex],
-    kernel: &CubicKernel,
-    neighbors: &[Vec<usize>],
-) -> Vec<f32> {
-    let mut densities = vec![0.0; vertices.len()];
-    for i in 0..vertices.len() {
-        let density = neighbor_sum(
-            |j| {
-                let r = vertices[i].position - vertices[j].position;
-                vertices[j].mass * kernel_weight(kernel, r.norm())
-            },
-            &neighbors[i],
-            0.0,
-        );
-        densities[i] = density;
-    }
-    densities
-}
-
-fn neighbor_sum<F, T>(delta: F, neighbors: &[usize], zero: T) -> T
-where
-    F: Fn(usize) -> T,
-    T: Add<Output = T>,
-{
-    let mut sum = zero;
-    for &neighbor_idx in neighbors {
-        sum = sum + delta(neighbor_idx);
-    }
-    sum
-}
-
-fn kernel_weight(kernel: &CubicKernel, r_norm: f32) -> f32 {
-    kernel.weight(r_norm)
 }

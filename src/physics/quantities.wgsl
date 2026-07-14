@@ -4,8 +4,10 @@ struct Particle {
     velocity: vec3<f32>,
     normal: vec3<f32>,
     density: f32,
+    rest_density: f32,
     mass: f32,
     cell_hash: u32,
+    boundary: u32,
 }
 
 const NU: f32 = 0.3; // viscosity
@@ -56,7 +58,7 @@ fn kernel_weight(i: u32, j: u32) -> f32 {
   // l1 norm of dist / cell size
   let q = dot(abs(particles[j].position - particles[i].position), vec3<f32>(1.0)) / CELL_SIZE;
   if (0 <= q && q <= 0.5) {
-      return SIGMA * 6.0 * (pow(q, 3.0) - pow(q, 2.0)) + 1;
+      return SIGMA * (6.0 * pow(q, 3.0) - 6.0 * pow(q, 2.0) + 1.0);
   } else if (0.5 < q && q <= 1.0) {
     return SIGMA * 2.0 * pow(1 - q, 3.0);
   }

@@ -3,8 +3,10 @@ struct Particle {
     velocity: vec3<f32>,
     normal: vec3<f32>,
     density: f32,
+    rest_density: f32,
     mass: f32,
     cell_hash: u32,
+    boundary: u32,
 }
 
 struct SortUniform {

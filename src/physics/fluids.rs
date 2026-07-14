@@ -1,5 +1,6 @@
 use crate::graphics::BufferDebug;
 use crate::physics::FluidParticle;
+use wgpu::util::DeviceExt;
 const WG_SIZE: u32 = 256;
 const RADIX_BUCKETS: u32 = 16;
 const RADIX_PASSES: usize = 8;
@@ -225,6 +226,15 @@ impl SpatialHashGPU {
             );
         }
 
+        {
+            let clear_bg = self.bind(device, particles, &self.sorted, &self.uniforms[0]);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.reset_hash_offsets);
+            pass.set_bind_group(0, &clear_bg, &[]);
+            let clear_wgs = (27 * HASHTABLE_SIZE / WG_SIZE as u64) as u32;
+            pass.dispatch_workgroups(clear_wgs, 1, 1);
+        }
+
         let hash_bg = self.bind(device, particles, &self.sorted, &self.uniforms[0]);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
@@ -433,39 +443,82 @@ impl Simulation {
     }
 }
 
+/// Run SPH step with ping-ponging buffers
 pub struct FluidSim {
     spatial_hash: SpatialHashGPU,
     compute_densities: ComputeDensities,
     simulation: Simulation,
+    particles: [wgpu::Buffer; 2],
+    num_particles: u32,
+    current: usize,
 }
 
 impl FluidSim {
-    pub fn new(device: &wgpu::Device, max_particles: u32) -> Self {
+    pub fn new(device: &wgpu::Device, particles: &[FluidParticle]) -> Self {
+        let num_particles = particles.len() as u32;
+        let usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::VERTEX
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
+        let buffers = std::array::from_fn(|i| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("fluid particles {i}")),
+                contents: bytemuck::cast_slice(particles),
+                usage,
+            })
+        });
         Self {
-            spatial_hash: SpatialHashGPU::new(device, max_particles),
+            spatial_hash: SpatialHashGPU::new(device, num_particles),
             compute_densities: ComputeDensities::new(device),
             simulation: Simulation::new(device),
+            particles: buffers,
+            num_particles,
+            current: 0,
         }
     }
 
-    pub fn sort_particles(
-        &self,
+    /// (sort, densities, integrate) and swaps the buffers
+    pub fn step(
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        particles: &wgpu::Buffer,
-        num_particles: u32,
     ) {
-        self.spatial_hash
-            .sort(device, queue, encoder, particles, num_particles);
+        if self.num_particles == 0 {
+            return;
+        }
+        let src = self.current;
+        let dst = 1 - self.current;
         let hash_offsets = &self.spatial_hash.hash_offsets_buf;
+
+        self.spatial_hash
+            .sort(device, queue, encoder, &self.particles[src], self.num_particles);
         self.compute_densities.compute(
             device,
             queue,
             encoder,
-            particles,
+            &self.particles[src],
             hash_offsets,
-            num_particles,
+            self.num_particles,
         );
+        self.simulation.run(
+            device,
+            queue,
+            encoder,
+            &self.particles[src],
+            &self.particles[dst],
+            hash_offsets,
+            self.num_particles,
+        );
+        self.current = dst;
+    }
+
+    /// get the buffer w/ most recent particle state
+    pub fn particle_buffer(&self) -> &wgpu::Buffer {
+        &self.particles[self.current]
+    }
+
+    pub fn num_particles(&self) -> u32 {
+        self.num_particles
     }
 }

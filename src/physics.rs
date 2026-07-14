@@ -1,3 +1,4 @@
+mod boundaries;
 mod fluids;
 mod shapes;
 use crate::graphics::Vertex;
@@ -10,8 +11,11 @@ use nalgebra::{Matrix3, Point3, Vector3};
 use std::collections::HashSet;
 use std::ops::Add;
 
+pub use boundaries::ContainerBoundary;
 pub use fluids::FluidSim;
 pub use shapes::*;
+
+pub const FLUID_COLOR: [f32; 3] = [0.2, 0.5, 0.95];
 
 #[derive(Debug, Clone)]
 #[allow(unused)]
@@ -62,6 +66,102 @@ impl Default for FluidParticle {
             cell_hash: 0,
             boundary: 0,
         }
+    }
+}
+
+impl FluidParticle {
+    /// Per-instance layout so the render pipeline can read particles straight
+    /// from the simulation buffer (position, `normal` as color, boundary flag).
+    pub fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::offset_of!(FluidParticle, normal) as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::offset_of!(FluidParticle, boundary) as wgpu::BufferAddress,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+            ],
+        }
+    }
+
+    /// Far-away static particle for padding the buffer to a workgroup multiple.
+    /// `mass > 0` keeps its self-density nonzero (no division by zero).
+    pub fn inert() -> Self {
+        Self {
+            position: [1000.0, 1000.0, 1000.0],
+            mass: 1.0,
+            boundary: 0,
+            ..Default::default()
+        }
+    }
+}
+
+/// n x n x n cube of fluid particles
+pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidParticle> {
+    let mut particles = Vec::with_capacity(n * n * n);
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..n {
+                particles.push(FluidParticle {
+                    position: [
+                        origin.x + i as f32 * spacing,
+                        origin.y + j as f32 * spacing,
+                        origin.z + k as f32 * spacing,
+                    ],
+                    normal: FLUID_COLOR,
+                    mass: 1.0,
+                    boundary: 1,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    particles
+}
+
+/// set each particle's rest_density (and density) from its rest configuration;
+/// NOTE: fluid particles (`boundary == 1`) get their own initial density. boundary
+/// particles instead take the fluid's rest density
+pub fn assign_rest_densities(particles: &mut [FluidParticle], kernel: &CubicKernel) {
+    let vertices: Vec<PhysicsVertex> = particles
+        .iter()
+        .map(|p| PhysicsVertex {
+            position: Vector3::new(p.position[0], p.position[1], p.position[2]),
+            velocity: Vector3::zeros(),
+            renderable: false,
+            mass: p.mass,
+        })
+        .collect();
+    let positions: Vec<Vector3<f32>> = vertices.iter().map(|v| v.position).collect();
+    let neighbors = precompute_neighbors(&positions, kernel);
+    let densities = compute_densities(&vertices, kernel, &neighbors);
+
+    let fluid_rest = particles
+        .iter()
+        .zip(&densities)
+        .filter(|(p, _)| p.boundary == 1)
+        .map(|(_, &d)| d)
+        .fold(0.0_f32, f32::max);
+
+    for (particle, &density) in particles.iter_mut().zip(&densities) {
+        particle.density = density;
+        particle.rest_density = if particle.boundary == 1 {
+            density
+        } else {
+            fluid_rest
+        };
     }
 }
 
@@ -168,20 +268,16 @@ impl CubicKernel {
     pub fn new(h: f32) -> Self {
         Self { h }
     }
-
     pub fn weight(&self, r_norm: f32) -> f32 {
         let q = r_norm / self.h;
-        if q >= 1.0 || q < 0.0 {
-            return 0.0;
+        let sigma = 8.0 / (std::f32::consts::PI * self.h.powi(3));
+        if q <= 0.5 {
+            sigma * (6.0 * q.powi(3) - 6.0 * q.powi(2) + 1.0)
+        } else if q <= 1.0 {
+            sigma * 2.0 * (1.0 - q).powi(3)
+        } else {
+            0.0
         }
-
-        // 3D normalization constant for Wendland C2
-        let sigma = 21.0 / (2.0 * std::f32::consts::PI * self.h.powf(3.0));
-
-        let term = 1.0 - q;
-        let w = term.powf(4.0) * (4.0 * q + 1.0);
-
-        w * sigma
     }
 
     fn weight_gradient(&self, r: Vector3<f32>) -> Vector3<f32> {
@@ -189,26 +285,20 @@ impl CubicKernel {
         if r_norm == 0.0 {
             return Vector3::zeros();
         }
-
         let q = r_norm / self.h;
-        if q >= 1.0 {
-            return Vector3::zeros();
-        }
-
-        let sigma = 21.0 / (2.0 * std::f32::consts::PI * self.h.powf(3.0));
-
-        // dW/dq = -20 * q * (1 - q)^3
-        let dw_dq = -20.0 * q * (1.0 - q).powf(3.0);
-
+        let sigma = 8.0 / (std::f32::consts::PI * self.h.powi(3));
+        let dw_dq = if q <= 0.5 {
+            sigma * (18.0 * q.powi(2) - 12.0 * q)
+        } else if q <= 1.0 {
+            sigma * -6.0 * (1.0 - q).powi(2)
+        } else {
+            0.0
+        };
         // dq/dx = r / (h * ||r||)
-        let dq_dx = r / (self.h * r_norm);
-
-        // Chain rule: dW/dx = dW/dq * dq/dx
-        let gradient = (dw_dq * sigma) * dq_dx;
-        gradient
+        (dw_dq / (self.h * r_norm)) * r
     }
 
-    /// Performs pairwise evaluation of Wendland C2 kernel between the two.
+    /// Performs pairwise evaluation of the cubic spline kernel between the two.
     /// Index [i][j] of output is W_{ij} = W(x_i - x_j).
     pub fn eval(
         &self,
@@ -265,7 +355,7 @@ pub fn compute_densities(
     densities
 }
 
-fn kernel_weight(kernel: &CubicKernel, r_norm: f32) -> f32 {
+pub fn kernel_weight(kernel: &CubicKernel, r_norm: f32) -> f32 {
     kernel.weight(r_norm)
 }
 
