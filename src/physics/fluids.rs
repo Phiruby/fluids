@@ -55,7 +55,7 @@ pub struct SpatialHashGPU {
     /// One uniform buffer per radix pass (avoids overwrite-before-submit).
     uniforms: [wgpu::Buffer; RADIX_PASSES],
     histogram_buf: wgpu::Buffer,
-    hash_offsets_buf: wgpu::Buffer,
+    pub(in crate::physics) hash_offsets_buf: wgpu::Buffer,
     sorted: wgpu::Buffer,
     max_particles: u32,
     buffer_debug: BufferDebug,
@@ -276,14 +276,94 @@ impl SpatialHashGPU {
     }
 }
 
+pub struct ComputeDensities {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+impl ComputeDensities {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let module = device.create_shader_module(wgpu::include_wgsl!("quantities.wgsl"));
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compute densities"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("density_computation"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let compute_densities = pipeline(device, &pipeline_layout, &module, "compute_quantities");
+        Self {
+            pipeline: compute_densities,
+            layout,
+        }
+    }
+    pub fn compute(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        particles: &wgpu::Buffer,
+        hash_offsets: &wgpu::Buffer,
+        num_particles: u32,
+    ) {
+        // TODO: does this need to be done every compute call?
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: particles.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: hash_offsets.as_entire_binding(),
+                },
+            ],
+        });
+        let ndispatches = num_particles / 256;
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(ndispatches, 1, 1);
+        }
+    }
+}
+
 pub struct FluidSim {
     spatial_hash: SpatialHashGPU,
+    compute_densities: ComputeDensities,
 }
 
 impl FluidSim {
     pub fn new(device: &wgpu::Device, max_particles: u32) -> Self {
         Self {
             spatial_hash: SpatialHashGPU::new(device, max_particles),
+            compute_densities: ComputeDensities::new(device),
         }
     }
 
@@ -297,5 +377,14 @@ impl FluidSim {
     ) {
         self.spatial_hash
             .sort(device, queue, encoder, particles, num_particles);
+        let hash_offsets = &self.spatial_hash.hash_offsets_buf;
+        self.compute_densities.compute(
+            device,
+            queue,
+            encoder,
+            particles,
+            hash_offsets,
+            num_particles,
+        );
     }
 }
