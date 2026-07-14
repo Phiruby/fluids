@@ -12,6 +12,7 @@ const NU: f32 = 0.3; // viscosity
 // NOTE: this should be synced with spatial_hash.wgsl
 const CELL_SIZE: f32 = 0.1;
 const HASHTABLE_SIZE: u32 = 8192u;
+const SIGMA = 8.0 / (3.14159 * pow(CELL_SIZE, 3.0));
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> hash_offsets: array<vec2<u32>>;
@@ -50,8 +51,15 @@ fn neighbor_hashes(idx: u32) -> array<u32, 27> {
     return neighbors;
 }
 
+// cubic spline kernel
 fn kernel_weight(i: u32, j: u32) -> f32 {
-  // TODO
+  // l1 norm of dist / cell size
+  let q = dot(abs(particles[j].position - particles[i].position), vec3<f32>(1.0)) / CELL_SIZE;
+  if (0 <= q && q <= 0.5) {
+      return SIGMA * 6.0 * (pow(q, 3.0) - pow(q, 2.0)) + 1;
+  } else if (0.5 < q && q <= 1.0) {
+    return SIGMA * 2.0 * pow(1 - q, 3.0);
+  }
   return 0.0;
 }
 
@@ -63,8 +71,10 @@ fn compute_density(idx: u32) -> f32 {
     let start = offset.x;
     let end = offset.y;
     for (var j: u32 = start; j < end; j++) {
-      let kw = kernel_weight(idx, j);
-      density += particles[j].mass * kw;
+      if (distance(particles[j].position, particles[idx].position) <= CELL_SIZE) {
+        let kw = kernel_weight(idx, j);
+        density += particles[j].mass * kw;
+      }
     }
   }
   return density;
