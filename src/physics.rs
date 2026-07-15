@@ -156,11 +156,15 @@ pub fn assign_rest_densities(particles: &mut [FluidParticle], kernel: &CubicKern
         .fold(0.0_f32, f32::max);
 
     for (particle, &density) in particles.iter_mut().zip(&densities) {
-        particle.density = density;
         particle.rest_density = if particle.boundary == 1 {
             density
         } else {
             fluid_rest
+        };
+        particle.density = if particle.boundary == 1 {
+            density
+        } else {
+            particle.rest_density
         };
     }
 }

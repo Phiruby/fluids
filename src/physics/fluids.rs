@@ -451,6 +451,7 @@ pub struct FluidSim {
     particles: [wgpu::Buffer; 2],
     num_particles: u32,
     current: usize,
+    debugger: BufferDebug,
 }
 
 impl FluidSim {
@@ -474,6 +475,10 @@ impl FluidSim {
             particles: buffers,
             num_particles,
             current: 0,
+            debugger: BufferDebug::new(
+                device,
+                num_particles as u64 * std::mem::size_of::<FluidParticle>() as u64,
+            ),
         }
     }
 
@@ -487,12 +492,21 @@ impl FluidSim {
         if self.num_particles == 0 {
             return;
         }
+        let o =
+            self.debugger
+                .read::<FluidParticle>(device, queue, &self.particles[self.current], 1);
+        dbg!(o);
         let src = self.current;
         let dst = 1 - self.current;
         let hash_offsets = &self.spatial_hash.hash_offsets_buf;
 
-        self.spatial_hash
-            .sort(device, queue, encoder, &self.particles[src], self.num_particles);
+        self.spatial_hash.sort(
+            device,
+            queue,
+            encoder,
+            &self.particles[src],
+            self.num_particles,
+        );
         self.compute_densities.compute(
             device,
             queue,

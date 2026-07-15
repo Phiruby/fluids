@@ -65,9 +65,12 @@ fn kernel_weight(i: u32, j: u32) -> f32 {
   return 0.0;
 }
 
+// computes delta density;
+// for boundary particles, the output will always be 0 (we will maintain same density for boundaries)
 fn compute_density(idx: u32) -> f32 {
    let neighbors = neighbor_hashes(idx);
    var density: f32 = 0.0;
+   let is_fluid = f32(particles[idx].boundary);
    for (var i: u32 = 0u; i < 27u; i++) {
     let offset = hash_offsets[neighbors[i]];
     let start = offset.x;
@@ -75,7 +78,7 @@ fn compute_density(idx: u32) -> f32 {
     for (var j: u32 = start; j < end; j++) {
       if (distance(particles[j].position, particles[idx].position) <= CELL_SIZE) {
         let kw = kernel_weight(idx, j);
-        density += particles[j].mass * kw;
+        density += is_fluid * particles[j].mass * kw;
       }
     }
   }
@@ -86,8 +89,8 @@ fn compute_density(idx: u32) -> f32 {
 @compute
 @workgroup_size(256)
 fn compute_quantities(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let density = compute_density(gid.x);
+  let delta_density = compute_density(gid.x);
   // NOTE: ok to write back to same input buffer since computed quantities here do not make use of density;
   // so no race conditions
-  particles[gid.x].density = density;
+  particles[gid.x].density += delta_density;
 }
