@@ -19,6 +19,7 @@ const SIGMA = 8.0 / (3.14159 * pow(CELL_SIZE, 3.0));
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> hash_offsets: array<vec2<u32>>;
 
+@group(0) @binding(2) var<storage, read_write> debug: array<vec3<f32>>;
 fn cell_index(position: vec3<f32>) -> vec3<u32> {
     return vec3<u32>(
         u32(position.x / CELL_SIZE),
@@ -63,6 +64,10 @@ fn kernel_weight(i: u32, j: u32) -> f32 {
     return SIGMA * 2.0 * pow(1 - q, 3.0);
   }
   return 0.0;
+}
+
+fn is_nan(x: f32) -> bool {
+  return (x < 0.0 || x > 0.0 || x == 0.0) == false;
 }
 
 // computes delta density;

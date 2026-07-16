@@ -274,6 +274,8 @@ impl SpatialHashGPU {
 pub struct ComputeDensities {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    debug_buffer: wgpu::Buffer,
+    debugger: BufferDebug,
 }
 
 impl ComputeDensities {
@@ -302,6 +304,16 @@ impl ComputeDensities {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -310,9 +322,21 @@ impl ComputeDensities {
             immediate_size: 0,
         });
         let compute_densities = pipeline(device, &pipeline_layout, &module, "compute_quantities");
+        let debug_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("debug buffer"),
+            size: 1024 * 1024 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST |
+            wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         Self {
             pipeline: compute_densities,
             layout,
+            debug_buffer,
+            debugger: BufferDebug::new(
+                device,
+                1024 * 1024 * 4,
+            ),
         }
     }
     pub fn compute(
@@ -337,8 +361,19 @@ impl ComputeDensities {
                     binding: 1,
                     resource: hash_offsets.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.debug_buffer.as_entire_binding(),
+                },
             ],
         });
+        let o = self.debugger.read::<[f32; 3]>(
+            device,
+            queue,
+            &self.debug_buffer,
+            1,
+        );
+        dbg!(o);
         let ndispatches = num_particles / 256;
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
@@ -353,6 +388,8 @@ impl ComputeDensities {
 struct Simulation {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    debug_buffer: wgpu::Buffer,
+    debugger: BufferDebug,
 }
 impl Simulation {
     pub fn new(device: &wgpu::Device) -> Self {
@@ -390,6 +427,17 @@ impl Simulation {
                     },
                     count: None,
                 },
+                // debug buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -398,9 +446,21 @@ impl Simulation {
             immediate_size: 0,
         });
         let simulate = pipeline(device, &pipeline_layout, &module, "simulate");
+        let debug_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("debug buffer"),
+            size: 1024 * 1024 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST |
+            wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         Self {
             pipeline: simulate,
             layout,
+            debug_buffer,
+            debugger: BufferDebug::new(
+                device,
+                1024 * 1024 * 4,
+            ),
         }
     }
 
@@ -431,8 +491,19 @@ impl Simulation {
                     binding: 2,
                     resource: output_particles.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.debug_buffer.as_entire_binding(),
+                },
             ],
         });
+        // let o = self.debugger.read::<[f32; 3]>(
+        //     device,
+        //     queue,
+        //     &self.debug_buffer,
+        //     1,
+        // );
+        // dbg!(o);
         let ndispatches = num_particles / 256;
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
@@ -492,10 +563,6 @@ impl FluidSim {
         if self.num_particles == 0 {
             return;
         }
-        let o =
-            self.debugger
-                .read::<FluidParticle>(device, queue, &self.particles[self.current], 1);
-        dbg!(o);
         let src = self.current;
         let dst = 1 - self.current;
         let hash_offsets = &self.spatial_hash.hash_offsets_buf;
@@ -524,6 +591,10 @@ impl FluidSim {
             hash_offsets,
             self.num_particles,
         );
+        let o =
+            self.debugger
+                .read::<FluidParticle>(device, queue, &self.particles[self.current], 1);
+        dbg!(o);
         self.current = dst;
     }
 

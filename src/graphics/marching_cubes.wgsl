@@ -45,17 +45,56 @@ fn marching_cubes_cell_index(position: vec3<f32>) -> vec3<u32> {
     );
 }
 
+
+fn neighbor_hashes(pos: vec3<f32>) -> array<u32, 27> {
+    let cur = cell_index(pos);
+    var neighbors: array<u32, 27>;
+    var i = 0u;
+
+    for (var dz: i32 = -1; dz <= 1; dz++) {
+        for (var dy: i32 = -1; dy <= 1; dy++) {
+            for (var dx: i32 = -1; dx <= 1; dx++) {
+                neighbors[i] = hash_position(vec3<u32>(
+                    u32(i32(cur.x) + dx),
+                    u32(i32(cur.y) + dy),
+                    u32(i32(cur.z) + dz),
+                ));
+                i++;
+            }
+        }
+    }
+    return neighbors;
+}
+
 fn hash_position(cell_id: vec3<u32>) -> u32 {
     let kappa = 9u * (cell_id.x % 3u) + 3u * (cell_id.y % 3u) + (cell_id.z % 3u);
     let beta = ((17u * cell_id.x) ^ (31u * cell_id.y) ^ (61u * cell_id.z)) % HASHTABLE_SIZE;
     return 27u * beta + kappa;
 }
 
+fn evaluate_density(pos: vec3<f32>) {
+    let neighbors = neighbor_hashes(pos);
+    
+}
+
 @compute
 @workgroup_size(256)
 fn active_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
     let grid_x = i % N;
-    let grid_y = u32(i / N);
+    let grid_y = u32((i % pow(N, 2)) / N);
     let grid_z = u32(i / pow(N, 2.0));
-    // TODO: compute edge_x, edge_y, edge_z
+    let start = vec3<f32>(
+        grid_x * MARCHING_CUBES_CELL_SIZE,
+        grid_y * MARCHING_CUBES_CELL_SIZE,
+        grid_z * MARCHING_CUBES_CELL_SIZE
+    );
+    // TODO: out of grid edges need to be handled?
+    let edge_x_end = start + vec3<f32>(MARCHING_CUBES_CELL_SIZE, 0, 0);
+    let edge_y_end = start + vec3<f32>(0, MARCHING_CUBES_CELL_SIZE, 0);
+    let edge_z_end = start + vec3<f32>(0, 0, MARCHING_CUBES_CELL_SIZE);
+
+    let density_current = evaluate_density(start);
+    let density_x_end = evaluate_density(edge_x_end);
+    let density_y_end = evaluate_density(edge_y_end);
+    let density_z_end = evaluate_density(edge_z_end);
 }

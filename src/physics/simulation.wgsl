@@ -20,6 +20,7 @@ const K: f32 = 0.5;
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> hash_offsets: array<vec2<u32>>;
 @group(0) @binding(2) var<storage, read_write> output_particles: array<Particle>;
+@group(0) @binding(3) var<storage, read_write> debug: array<vec3<f32>>;
 
 fn cell_index(position: vec3<f32>) -> vec3<u32> {
     return vec3<u32>(
@@ -120,6 +121,9 @@ fn pressure_gradient(idx: u32) -> vec3<f32> {
                 let p_j = is_fluid * K * (particles[j].density - particles[j].rest_density)
                   + (1 - is_fluid) * p_i;
                 let ratio_j = p_j / pow(particles[j].density, 2.0);
+                // if (particles[j].density <= 1e-6) {
+                //     debug[idx] = vec3<f32>(f32(particles[j].density), particles[j].rest_density, f32(particles[j].boundary));
+                // }
                 sum -= particles[j].mass * (ratio + ratio_j) * kernel_gradient(idx, j);
             }
         }
