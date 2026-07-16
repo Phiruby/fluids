@@ -58,15 +58,15 @@ fn particle_out(input: VertexInput, color: vec3<f32>, alpha: f32) -> VertexOutpu
 // for fluid particles (stays opauque)
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
-    if (input.boundary == 0u) { return culled(); }
+    if input.boundary == 0u { return culled(); }
     return particle_out(input, input.color, 1.0);
 }
 
 // for bounadry particles
 @vertex
 fn vs_boundary(input: VertexInput) -> VertexOutput {
-    if (input.boundary != 0u) { return culled(); }
-    return particle_out(input, vec3<f32>(0.7, 0.7, 0.75), 0.18);
+    if input.boundary != 0u { return culled(); }
+    return particle_out(input, vec3<f32>(0.7, 0.7, 0.75), 0.005);
 }
 
 @vertex

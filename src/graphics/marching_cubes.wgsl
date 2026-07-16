@@ -8,12 +8,12 @@ struct Particle {
     rest_density: f32,
     mass: f32,
     cell_hash: u32,
-    boundary: u32
-}
+    boundary: u32}
 
 // marching cubes will be performed over cube defined by this top left and bottom right
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.5, -2.5, 0.0);
 const N: u32 = 100;
+const ISO_LEVEL: f32 = 1000.0;
 
 const MARCHING_CUBES_CELL_SIZE: f32 = 0.1;
 
@@ -45,7 +45,6 @@ fn marching_cubes_cell_index(position: vec3<f32>) -> vec3<u32> {
     );
 }
 
-
 fn neighbor_hashes(pos: vec3<f32>) -> array<u32, 27> {
     let cur = cell_index(pos);
     var neighbors: array<u32, 27>;
@@ -72,21 +71,46 @@ fn hash_position(cell_id: vec3<u32>) -> u32 {
     return 27u * beta + kappa;
 }
 
-fn evaluate_density(pos: vec3<f32>) {
+// cubic spline kernel; taken from quantities.wgsl
+fn kernel_weight(pos_i: vec3<f32>, pos_j: vec3<f32>) -> f32 {
+    // l1 norm of dist / cell size
+    let q = dot(abs(pos_j - pos_i), vec3<f32>(1.0)) / CELL_SIZE;
+    if 0 <= q && q <= 0.5 {
+        return SIGMA * (6.0 * pow(q, 3.0) - 6.0 * pow(q, 2.0) + 1.0);
+    } else if 0.5 < q && q <= 1.0 {
+        return SIGMA * 2.0 * pow(1 - q, 3.0);
+    }
+    return 0.0;
+}
+
+fn evaluate_density(pos: vec3<f32>) -> f32 {
     let neighbors = neighbor_hashes(pos);
-    
+    let density = 0.0;
+    for (var i: u32 = 0u; i < 27u; i++) {
+        let offset = hash_offsets[neighbors[i]];
+        let start = offset.x;
+        let end = offset.y;
+        for (var j: u32 = start; j < end; j++) {
+            if distance(particles[j].position, pos) <= CELL_SIZE {
+                let density = kernel_weight(particles[j].position, pos) * particles[j].mass;
+            }
+        }
+    }
+    return density;
 }
 
 @compute
 @workgroup_size(256)
 fn active_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
+
+    let i = gid.x;
     let grid_x = i % N;
-    let grid_y = u32((i % pow(N, 2)) / N);
-    let grid_z = u32(i / pow(N, 2.0));
+    let grid_y = u32((i % (N * N)) / N);
+    let grid_z = u32(i / (N * N));
     let start = vec3<f32>(
-        grid_x * MARCHING_CUBES_CELL_SIZE,
-        grid_y * MARCHING_CUBES_CELL_SIZE,
-        grid_z * MARCHING_CUBES_CELL_SIZE
+        f32(grid_x) * MARCHING_CUBES_CELL_SIZE,
+        f32(grid_y) * MARCHING_CUBES_CELL_SIZE,
+        f32(grid_z) * MARCHING_CUBES_CELL_SIZE
     );
     // TODO: out of grid edges need to be handled?
     let edge_x_end = start + vec3<f32>(MARCHING_CUBES_CELL_SIZE, 0, 0);
@@ -97,4 +121,10 @@ fn active_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
     let density_x_end = evaluate_density(edge_x_end);
     let density_y_end = evaluate_density(edge_y_end);
     let density_z_end = evaluate_density(edge_z_end);
+
+    var nvertices: u32 = 0;
+    // check if density equals desired iso level in between the points
+    if (density_current - ISO_LEVEL) * (density_x_end - ISO_LEVEL) < 0.0 { nvertices++; }
+    if (density_current - ISO_LEVEL) * (density_y_end - ISO_LEVEL) < 0.0 { nvertices++; }
+    if (density_current - ISO_LEVEL) * (density_z_end - ISO_LEVEL) < 0.0 { nvertices++; }
 }

@@ -37,7 +37,7 @@ enum RenderMode {
 
 const RENDER_MODE: RenderMode = RenderMode::Mesh;
 
-const FLUID_GRID_N: usize = 8;
+const FLUID_GRID_N: usize = 10;
 const FLUID_SPACING: f32 = 0.05;
 const FLUID_PARTICLE_RADIUS: f32 = 0.02;
 const FLUID_ORIGIN: [f32; 3] = [-0.6, 0.2, -0.2];
@@ -294,10 +294,11 @@ impl State {
         let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
 
         // Construct: fluid cube init bounded by a cube-boundary
-        let mut fluid_particles = fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
+        let mut fluid_particles =
+            fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
         let container = ContainerBoundary {
-            top_left: nalgebra::Point3::new(-0.75, 0.05, -0.4),
-            bottom_right: nalgebra::Point3::new(-0.1, 0.7, 0.3),
+            top_left: nalgebra::Point3::new(-1.00, 0.05, -0.4),
+            bottom_right: nalgebra::Point3::new(-0.1, 1.15, 0.3),
             nlayers: FLUID_CONTAINER_LAYERS,
             spacing: FLUID_SPACING / 2.0,
         };
@@ -386,8 +387,7 @@ impl State {
         self.physics_pipeline
             .compute(&self.device, &self.queue, &mut encoder);
 
-        self.fluid_sim
-            .step(&self.device, &self.queue, &mut encoder);
+        self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -640,4 +640,3 @@ pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
 
     Ok(())
 }
-

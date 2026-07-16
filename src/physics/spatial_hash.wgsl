@@ -48,7 +48,7 @@ fn digit(key: u32) -> u32 {
 @compute
 @workgroup_size(256)
 fn build_hash_table(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.num_particles) { return; }
+    if gid.x >= params.num_particles { return; }
     particles[gid.x].cell_hash = hash_position(particles[gid.x].position);
 }
 
@@ -61,17 +61,17 @@ fn histogram_shader(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(workgroup_id) wid: vec3<u32>,
 ) {
-    if (lid.x < RADIX_BUCKETS) {
+    if lid.x < RADIX_BUCKETS {
         atomicStore(&local_counts[lid.x], 0u);
     }
     workgroupBarrier();
 
-    if (gid.x < params.num_particles) {
+    if gid.x < params.num_particles {
         atomicAdd(&local_counts[digit(particles[gid.x].cell_hash)], 1u);
     }
     workgroupBarrier();
 
-    if (lid.x < RADIX_BUCKETS) {
+    if lid.x < RADIX_BUCKETS {
         histogram[wid.x * RADIX_BUCKETS + lid.x] = atomicLoad(&local_counts[lid.x]);
     }
 }
@@ -94,7 +94,7 @@ fn prefix_sum_shader() {
 }
 
 var<workgroup> bucket_base: array<u32, 16>;
-var<workgroup> local_digits: array<u32, 256>;
+var<workgroup> local_digits: array<u32, 256>; // store digit associated with each worker's local thread
 
 @compute
 @workgroup_size(256)
@@ -103,21 +103,21 @@ fn scatter_shader(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(workgroup_id) wid: vec3<u32>,
 ) {
-    if (lid.x < RADIX_BUCKETS) {
+    if lid.x < RADIX_BUCKETS {
         bucket_base[lid.x] = histogram[wid.x * RADIX_BUCKETS + lid.x];
     }
 
     let valid = gid.x < params.num_particles;
     var d = 0u;
-    if (valid) {
+    if valid {
         d = digit(particles[gid.x].cell_hash);
     }
     local_digits[lid.x] = d;
     workgroupBarrier();
 
-    if (valid) {
-        // TODO: could be optimized by storing digit-local ranks
+    if valid {
         var rank = 0u;
+        // this is here to ensure stable sort
         for (var i = 0u; i < lid.x; i++) {
             rank += u32(local_digits[i] == d);
         }
@@ -128,24 +128,24 @@ fn scatter_shader(
 @compute
 @workgroup_size(256)
 fn clear_hash_offsets(@builtin(global_invocation_id) gid: vec3<u32>) {
-  hash_offsets[gid.x] = vec2<u32>(0u, 0u);
+    hash_offsets[gid.x] = vec2<u32>(0u, 0u);
 }
 
 @compute
 @workgroup_size(256)
 fn build_offsets(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
-  if (i >= params.num_particles) { return; }
-  let hash = sorted_particles[i].cell_hash;
+    let i = gid.x;
+    if i >= params.num_particles { return; }
+    let hash = sorted_particles[i].cell_hash;
 
-  // beggining of hash
-  if (i == 0u || sorted_particles[i - 1u].cell_hash != hash) {
-      hash_offsets[hash].x = i;
-  }
+    // beggining of hash
+    if i == 0u || sorted_particles[i - 1u].cell_hash != hash {
+        hash_offsets[hash].x = i;
+    }
 
-  // end of hash section
-  if (i == params.num_particles - 1 || sorted_particles[i + 1u].cell_hash != hash) {
-      hash_offsets[hash].y = i + 1u;
-  }
+    // end of hash section
+    if i == params.num_particles - 1 || sorted_particles[i + 1u].cell_hash != hash {
+        hash_offsets[hash].y = i + 1u;
+    }
 }
 

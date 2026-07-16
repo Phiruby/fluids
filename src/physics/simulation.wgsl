@@ -14,7 +14,7 @@ struct Particle {
 const CELL_SIZE: f32 = 0.1;
 const HASHTABLE_SIZE: u32 = 8192u;
 const SIGMA = 8.0 / (3.14159 * pow(CELL_SIZE, 3.0));
-const DT: f32 = 0.002;
+const DT: f32 = 0.004;
 const K: f32 = 0.5;
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
