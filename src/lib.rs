@@ -303,8 +303,8 @@ impl State {
             spacing: FLUID_SPACING / 2.0,
         };
         let mut boundary_points = container.create_points(FLUID_CONTAINER_LAYERS);
+        assign_rest_densities(&mut fluid_particles, &mut boundary_points, &CubicKernel::new(FLUID_CELL_SIZE));
         fluid_particles.append(&mut boundary_points);
-        assign_rest_densities(&mut fluid_particles, &CubicKernel::new(FLUID_CELL_SIZE));
         let padded_len = fluid_particles.len().next_multiple_of(FLUID_WORKGROUP);
         fluid_particles.resize(padded_len, FluidParticle::inert());
 

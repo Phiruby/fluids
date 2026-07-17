@@ -26,19 +26,28 @@ const WG_SIZE: u32 = 256u;
 const CELL_SIZE: f32 = 0.1;
 const HASHTABLE_SIZE: u32 = 8192u;
 
-fn cell_index(position: vec3<f32>) -> vec3<u32> {
-    return vec3<u32>(
-        u32(position.x / CELL_SIZE),
-        u32(position.y / CELL_SIZE),
-        u32(position.z / CELL_SIZE),
+// Use floor→i32 so negative world coords (this scene is largely in -x/-z)
+// don't all collapse into cell 0 via u32(negative) clamping.
+fn cell_index(position: vec3<f32>) -> vec3<i32> {
+    return vec3<i32>(
+        i32(floor(position.x / CELL_SIZE)),
+        i32(floor(position.y / CELL_SIZE)),
+        i32(floor(position.z / CELL_SIZE)),
     );
 }
 
-fn hash_position(position: vec3<f32>) -> u32 {
-    let cell_id = cell_index(position);
-    let kappa = 9u * (cell_id.x % 3u) + 3u * (cell_id.y % 3u) + (cell_id.z % 3u);
-    let beta = ((17u * cell_id.x) ^ (31u * cell_id.y) ^ (61u * cell_id.z)) % HASHTABLE_SIZE;
+fn hash_cell(cell_id: vec3<i32>) -> u32 {
+    // u32(i32) wraps negatives; % keeps them in-range for the table.
+    let x = u32(cell_id.x);
+    let y = u32(cell_id.y);
+    let z = u32(cell_id.z);
+    let kappa = 9u * (x % 3u) + 3u * (y % 3u) + (z % 3u);
+    let beta = ((17u * x) ^ (31u * y) ^ (61u * z)) % HASHTABLE_SIZE;
     return 27u * beta + kappa;
+}
+
+fn hash_position(position: vec3<f32>) -> u32 {
+    return hash_cell(cell_index(position));
 }
 
 fn digit(key: u32) -> u32 {

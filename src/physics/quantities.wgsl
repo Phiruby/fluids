@@ -20,17 +20,20 @@ const SIGMA = 8.0 / (3.14159 * pow(CELL_SIZE, 3.0));
 @group(0) @binding(1) var<storage, read> hash_offsets: array<vec2<u32>>;
 
 @group(0) @binding(2) var<storage, read_write> debug: array<vec3<f32>>;
-fn cell_index(position: vec3<f32>) -> vec3<u32> {
-    return vec3<u32>(
-        u32(position.x / CELL_SIZE),
-        u32(position.y / CELL_SIZE),
-        u32(position.z / CELL_SIZE),
+fn cell_index(position: vec3<f32>) -> vec3<i32> {
+    return vec3<i32>(
+        i32(floor(position.x / CELL_SIZE)),
+        i32(floor(position.y / CELL_SIZE)),
+        i32(floor(position.z / CELL_SIZE)),
     );
 }
 
-fn hash_position(cell_id: vec3<u32>) -> u32 {
-    let kappa = 9u * (cell_id.x % 3u) + 3u * (cell_id.y % 3u) + (cell_id.z % 3u);
-    let beta = ((17u * cell_id.x) ^ (31u * cell_id.y) ^ (61u * cell_id.z)) % HASHTABLE_SIZE;
+fn hash_position(cell_id: vec3<i32>) -> u32 {
+    let x = u32(cell_id.x);
+    let y = u32(cell_id.y);
+    let z = u32(cell_id.z);
+    let kappa = 9u * (x % 3u) + 3u * (y % 3u) + (z % 3u);
+    let beta = ((17u * x) ^ (31u * y) ^ (61u * z)) % HASHTABLE_SIZE;
     return 27u * beta + kappa;
 }
 
@@ -42,11 +45,7 @@ fn neighbor_hashes(idx: u32) -> array<u32, 27> {
     for (var dz: i32 = -1; dz <= 1; dz++) {
         for (var dy: i32 = -1; dy <= 1; dy++) {
             for (var dx: i32 = -1; dx <= 1; dx++) {
-                neighbors[i] = hash_position(vec3<u32>(
-                    u32(i32(cur.x) + dx),
-                    u32(i32(cur.y) + dy),
-                    u32(i32(cur.z) + dz),
-                ));
+                neighbors[i] = hash_position(cur + vec3<i32>(dx, dy, dz));
                 i++;
             }
         }
@@ -54,10 +53,9 @@ fn neighbor_hashes(idx: u32) -> array<u32, 27> {
     return neighbors;
 }
 
-// cubic spline kernel
+// cubic spline kernel (L2 support radius = CELL_SIZE)
 fn kernel_weight(i: u32, j: u32) -> f32 {
-  // l1 norm of dist / cell size
-  let q = dot(abs(particles[j].position - particles[i].position), vec3<f32>(1.0)) / CELL_SIZE;
+  let q = distance(particles[j].position, particles[i].position) / CELL_SIZE;
   if (0 <= q && q <= 0.5) {
       return SIGMA * (6.0 * pow(q, 3.0) - 6.0 * pow(q, 2.0) + 1.0);
   } else if (0.5 < q && q <= 1.0) {
@@ -66,8 +64,9 @@ fn kernel_weight(i: u32, j: u32) -> f32 {
   return 0.0;
 }
 
-fn is_nan(x: f32) -> bool {
-  return (x < 0.0 || x > 0.0 || x == 0.0) == false;
+fn is_finite(x: f32) -> bool {
+  // NaN: x != x; Inf: x*0 != 0
+  return (x == x) && (x * 0.0 == 0.0);
 }
 
 // computes delta density;
@@ -84,6 +83,10 @@ fn compute_density(idx: u32) -> f32 {
       if (distance(particles[j].position, particles[idx].position) <= CELL_SIZE) {
         let kw = kernel_weight(idx, j);
         density += is_fluid * particles[j].mass * kw;
+
+        if (!is_finite(particles[j].mass) || !is_finite(f32(is_fluid)) || !is_finite(kw)) {
+          debug[idx] = vec3<f32>(f32(particles[j].density), particles[j].rest_density, f32(particles[j].boundary));
+        }
       }
     }
   }
@@ -94,8 +97,12 @@ fn compute_density(idx: u32) -> f32 {
 @compute
 @workgroup_size(256)
 fn compute_quantities(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let delta_density = compute_density(gid.x);
   // NOTE: ok to write back to same input buffer since computed quantities here do not make use of density;
   // so no race conditions
-  particles[gid.x].density += delta_density;
+  let rho = compute_density(gid.x);
+  if (particles[gid.x].boundary == 0u) {
+    particles[gid.x].density = particles[gid.x].rest_density;
+  } else {
+    particles[gid.x].density = rho;
+  }
 }

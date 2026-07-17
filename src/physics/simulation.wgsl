@@ -1,4 +1,3 @@
-
 struct Particle {
     position: vec3<f32>,
     velocity: vec3<f32>,
@@ -14,27 +13,36 @@ struct Particle {
 const CELL_SIZE: f32 = 0.1;
 const HASHTABLE_SIZE: u32 = 8192u;
 const SIGMA = 8.0 / (3.14159 * pow(CELL_SIZE, 3.0));
-const DT: f32 = 0.004;
-const K: f32 = 0.5;
+const DT: f32 = 0.002;
+const K: f32 = 50.0;
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> hash_offsets: array<vec2<u32>>;
 @group(0) @binding(2) var<storage, read_write> output_particles: array<Particle>;
 @group(0) @binding(3) var<storage, read_write> debug: array<vec3<f32>>;
 
-fn cell_index(position: vec3<f32>) -> vec3<u32> {
-    return vec3<u32>(
-        u32(position.x / CELL_SIZE),
-        u32(position.y / CELL_SIZE),
-        u32(position.z / CELL_SIZE),
+
+
+fn cell_index(position: vec3<f32>) -> vec3<i32> {
+    return vec3<i32>(
+        i32(floor(position.x / CELL_SIZE)),
+        i32(floor(position.y / CELL_SIZE)),
+        i32(floor(position.z / CELL_SIZE)),
     );
 }
 
-fn hash_position(cell_id: vec3<u32>) -> u32 {
-    let kappa = 9u * (cell_id.x % 3u) + 3u * (cell_id.y % 3u) + (cell_id.z % 3u);
-    let beta = ((17u * cell_id.x) ^ (31u * cell_id.y) ^ (61u * cell_id.z)) % HASHTABLE_SIZE;
+
+
+fn hash_position(cell_id: vec3<i32>) -> u32 {
+    let x = u32(cell_id.x);
+    let y = u32(cell_id.y);
+    let z = u32(cell_id.z);
+    let kappa = 9u * (x % 3u) + 3u * (y % 3u) + (z % 3u);
+    let beta = ((17u * x) ^ (31u * y) ^ (61u * z)) % HASHTABLE_SIZE;
     return 27u * beta + kappa;
 }
+
+
 
 fn neighbor_hashes(idx: u32) -> array<u32, 27> {
     let cur = cell_index(particles[idx].position);
@@ -44,11 +52,7 @@ fn neighbor_hashes(idx: u32) -> array<u32, 27> {
     for (var dz: i32 = -1; dz <= 1; dz++) {
         for (var dy: i32 = -1; dy <= 1; dy++) {
             for (var dx: i32 = -1; dx <= 1; dx++) {
-                neighbors[i] = hash_position(vec3<u32>(
-                    u32(i32(cur.x) + dx),
-                    u32(i32(cur.y) + dy),
-                    u32(i32(cur.z) + dz),
-                ));
+                neighbors[i] = hash_position(cur + vec3<i32>(dx, dy, dz));
                 i++;
             }
         }
@@ -56,28 +60,26 @@ fn neighbor_hashes(idx: u32) -> array<u32, 27> {
     return neighbors;
 }
 
-// gradient w.r.t first input for cubic spline kernel
+
+
+// gradient w.r.t first input for cubic spline kernel (L2)
 fn kernel_gradient(i: u32, j: u32) -> vec3<f32> {
     let r = particles[i].position - particles[j].position;
-    // TODO: should be l2 norm, not l1
-    let r_norm = dot(abs(r), vec3<f32>(1.0));
+    let r_norm = length(r);
     if r_norm == 0.0 {
         return vec3<f32>(0.0);
     }
     let q = r_norm / CELL_SIZE;
-    let partial_q_partial_x = vec3<f32>(
-        r.x / (pow(CELL_SIZE, 2.0) * q),
-        r.y / (pow(CELL_SIZE, 2.0) * q),
-        r.z / (pow(CELL_SIZE, 2.0) * q),
-    );
-
-    if 0 <= q && q <= 0.5 {
-        return SIGMA * (18.0 * pow(q, 2.0) * partial_q_partial_x - 12.0 * q * partial_q_partial_x);
+    let dq_dx = r / (CELL_SIZE * r_norm);
+    if 0.0 <= q && q <= 0.5 {
+        return SIGMA * (18.0 * q * q - 12.0 * q) * dq_dx;
     } else if 0.5 < q && q <= 1.0 {
-        return SIGMA * -6.0 * pow(1.0 - q, 2.0) * partial_q_partial_x;
+        return SIGMA * (-6.0 * (1.0 - q) * (1.0 - q)) * dq_dx;
     }
     return vec3<f32>(0.0);
 }
+
+
 
 // Eqn (102) from https://arxiv.org/pdf/2009.06944
 fn viscous_force(idx: u32) -> vec3<f32> {
@@ -92,7 +94,6 @@ fn viscous_force(idx: u32) -> vec3<f32> {
                 let v_j = particles[j].mass / particles[j].density;
                 let x_ij = particles[idx].position - particles[j].position;
                 let v_ij = particles[idx].velocity - particles[j].velocity;
-                // TODO: need gradient of kernel 
                 let grad = kernel_gradient(idx, j);
                 sum += v_j * dot(v_ij, x_ij) / (dot(x_ij, x_ij) + 0.01 * pow(CELL_SIZE, 2.0)) * grad;
             }
@@ -101,29 +102,27 @@ fn viscous_force(idx: u32) -> vec3<f32> {
     return sum;
 }
 
-// TODO: recomputation of density; can simultaneously get pressure gradient and viscocities in one loop
+
+
 // Eq (53) and the simple pressure formula in section 4.4. Output is nabla pressure / density (pressure acceleration)
 fn pressure_gradient(idx: u32) -> vec3<f32> {
     let p_i = K * (particles[idx].density - particles[idx].rest_density);
     let neighbors = neighbor_hashes(idx);
     var sum: vec3<f32> = vec3<f32>(0.0);
-
     let ratio = p_i / pow(particles[idx].density, 2.0);
+
     for (var i: u32 = 0u; i < 27u; i++) {
         let offset = hash_offsets[neighbors[i]];
         let start = offset.x;
         let end = offset.y;
         for (var j: u32 = start; j < end; j++) {
             if distance(particles[j].position, particles[idx].position) <= CELL_SIZE {
-                // NOTE: we do pressure mirroring here. if j is a fluid particle, we compute the pressure;
-                // if its a boundary particle, we compute the mirrored pressure
+                // pressure mirroring: fluid uses EOS; boundary mirrors p_i
                 let is_fluid = f32(particles[j].boundary);
                 let p_j = is_fluid * K * (particles[j].density - particles[j].rest_density)
-                  + (1 - is_fluid) * p_i;
+                  + (1.0 - is_fluid) * p_i;
+
                 let ratio_j = p_j / pow(particles[j].density, 2.0);
-                // if (particles[j].density <= 1e-6) {
-                //     debug[idx] = vec3<f32>(f32(particles[j].density), particles[j].rest_density, f32(particles[j].boundary));
-                // }
                 sum -= particles[j].mass * (ratio + ratio_j) * kernel_gradient(idx, j);
             }
         }
@@ -131,19 +130,23 @@ fn pressure_gradient(idx: u32) -> vec3<f32> {
     return sum;
 }
 
+
+
 @compute
 @workgroup_size(256)
 fn simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let density = particles[gid.x].density;
+    var particle: Particle = particles[gid.x];
+    if (particle.boundary == 0u) {
+        output_particles[gid.x] = particle;
+        return;
+    }
+
+    let density = particle.density;
     let viscosity = viscous_force(gid.x) / density;
     let pressure_acceleration = pressure_gradient(gid.x);
     let dv = (viscosity + pressure_acceleration + vec3<f32>(0.0, -9.81, 0.0)) * DT;
-    var particle: Particle = particles[gid.x];
-    // boundary == 0 marks a static particle: it still
-    // contributes to neighbors' density/pressure, but never integrates its own motion;
-    // multiplying by the flag keeps those particles pinned in place
-    let is_fluid = f32(particle.boundary);
-    particle.velocity += dv * is_fluid;
-    particle.position += particle.velocity * DT * is_fluid;
+    particle.velocity += dv;
+    particle.position += particle.velocity * DT;
     output_particles[gid.x] = particle;
 }
+

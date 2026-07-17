@@ -96,12 +96,13 @@ impl FluidParticle {
         }
     }
 
-    /// Far-away static particle for padding the buffer to a workgroup multiple.
-    /// `mass > 0` keeps its self-density nonzero (no division by zero).
+    /// Just to pad the buffers
     pub fn inert() -> Self {
         Self {
             position: [1000.0, 1000.0, 1000.0],
             mass: 1.0,
+            density: 1.0,
+            rest_density: 1.0,
             boundary: 0,
             ..Default::default()
         }
@@ -134,7 +135,11 @@ pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidPart
 /// set each particle's rest_density (and density) from its rest configuration;
 /// NOTE: fluid particles (`boundary == 1`) get their own initial density. boundary
 /// particles instead take the fluid's rest density
-pub fn assign_rest_densities(particles: &mut [FluidParticle], kernel: &CubicKernel) {
+pub fn assign_rest_densities(
+    particles: &mut [FluidParticle],
+    boundary_particles: &mut [FluidParticle],
+    kernel: &CubicKernel,
+) {
     let vertices: Vec<PhysicsVertex> = particles
         .iter()
         .map(|p| PhysicsVertex {
@@ -148,24 +153,22 @@ pub fn assign_rest_densities(particles: &mut [FluidParticle], kernel: &CubicKern
     let neighbors = precompute_neighbors(&positions, kernel);
     let densities = compute_densities(&vertices, kernel, &neighbors);
 
+    for (particle, &density) in particles.iter_mut().zip(&densities) {
+        particle.rest_density = density;
+        particle.density = density;
+    }
+
+    let nfluid = particles.iter().filter(|p| p.boundary == 1).count().max(1);
     let fluid_rest = particles
         .iter()
-        .zip(&densities)
-        .filter(|(p, _)| p.boundary == 1)
-        .map(|(_, &d)| d)
-        .fold(0.0_f32, f32::max);
+        .filter(|p| p.boundary == 1)
+        .map(|p| p.rest_density)
+        .sum::<f32>()
+        / nfluid as f32;
 
-    for (particle, &density) in particles.iter_mut().zip(&densities) {
-        particle.rest_density = if particle.boundary == 1 {
-            density
-        } else {
-            fluid_rest
-        };
-        particle.density = if particle.boundary == 1 {
-            density
-        } else {
-            particle.rest_density
-        };
+    for p in boundary_particles.iter_mut() {
+        p.rest_density = fluid_rest;
+        p.density = fluid_rest;
     }
 }
 
