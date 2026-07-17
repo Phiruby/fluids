@@ -297,13 +297,17 @@ impl State {
         let mut fluid_particles =
             fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
         let container = ContainerBoundary {
-            top_left: nalgebra::Point3::new(-1.00, 0.05, -0.4),
-            bottom_right: nalgebra::Point3::new(-0.1, 1.15, 0.3),
+            top_left: nalgebra::Point3::new(-1.20, 0.05, -1.0),
+            bottom_right: nalgebra::Point3::new(0.1, 1.15, 0.8),
             nlayers: FLUID_CONTAINER_LAYERS,
             spacing: FLUID_SPACING / 2.0,
         };
         let mut boundary_points = container.create_points(FLUID_CONTAINER_LAYERS);
-        assign_rest_densities(&mut fluid_particles, &mut boundary_points, &CubicKernel::new(FLUID_CELL_SIZE));
+        assign_rest_densities(
+            &mut fluid_particles,
+            &mut boundary_points,
+            &CubicKernel::new(FLUID_CELL_SIZE),
+        );
         fluid_particles.append(&mut boundary_points);
         let padded_len = fluid_particles.len().next_multiple_of(FLUID_WORKGROUP);
         fluid_particles.resize(padded_len, FluidParticle::inert());

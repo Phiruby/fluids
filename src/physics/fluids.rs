@@ -183,7 +183,7 @@ impl PrefixSum {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&self.prefix_sum_pipeline);
         pass.set_bind_group(0, &bg, &[]);
-        let nworkers = n_input_elements / 512;
+        let nworkers = n_input_elements.div_ceil(512);
         pass.dispatch_workgroups(nworkers, 1, 1);
         // get prefix sum of the summation buffer; the offset buffer will contain
         // offsets for each workgroup after this finishes
@@ -784,7 +784,7 @@ mod prefix_sum_test {
     #[test]
     fn prefix_sum_exclusive() {
         let (device, queue) = gpu();
-        let n = 520u32;
+        let n = 1236u32;
         let input: Vec<u32> = (1..=n).collect();
         let expected: Vec<u32> = {
             let mut e = vec![0u32; n as usize];
@@ -814,6 +814,7 @@ mod prefix_sum_test {
 
         let got = dbg.read::<u32>(&device, &queue, &out_buf, n as u64);
         dbg!(&got[..16], &expected[..16]);
+        dbg!(got.len(), expected.len());
         assert_eq!(got, expected);
     }
 }

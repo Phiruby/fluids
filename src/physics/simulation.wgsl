@@ -21,8 +21,6 @@ const K: f32 = 50.0;
 @group(0) @binding(2) var<storage, read_write> output_particles: array<Particle>;
 @group(0) @binding(3) var<storage, read_write> debug: array<vec3<f32>>;
 
-
-
 fn cell_index(position: vec3<f32>) -> vec3<i32> {
     return vec3<i32>(
         i32(floor(position.x / CELL_SIZE)),
@@ -30,8 +28,6 @@ fn cell_index(position: vec3<f32>) -> vec3<i32> {
         i32(floor(position.z / CELL_SIZE)),
     );
 }
-
-
 
 fn hash_position(cell_id: vec3<i32>) -> u32 {
     let x = u32(cell_id.x);
@@ -41,8 +37,6 @@ fn hash_position(cell_id: vec3<i32>) -> u32 {
     let beta = ((17u * x) ^ (31u * y) ^ (61u * z)) % HASHTABLE_SIZE;
     return 27u * beta + kappa;
 }
-
-
 
 fn neighbor_hashes(idx: u32) -> array<u32, 27> {
     let cur = cell_index(particles[idx].position);
@@ -60,8 +54,6 @@ fn neighbor_hashes(idx: u32) -> array<u32, 27> {
     return neighbors;
 }
 
-
-
 // gradient w.r.t first input for cubic spline kernel (L2)
 fn kernel_gradient(i: u32, j: u32) -> vec3<f32> {
     let r = particles[i].position - particles[j].position;
@@ -78,8 +70,6 @@ fn kernel_gradient(i: u32, j: u32) -> vec3<f32> {
     }
     return vec3<f32>(0.0);
 }
-
-
 
 // Eqn (102) from https://arxiv.org/pdf/2009.06944
 fn viscous_force(idx: u32) -> vec3<f32> {
@@ -102,11 +92,9 @@ fn viscous_force(idx: u32) -> vec3<f32> {
     return sum;
 }
 
-
-
 // Eq (53) and the simple pressure formula in section 4.4. Output is nabla pressure / density (pressure acceleration)
 fn pressure_gradient(idx: u32) -> vec3<f32> {
-    let p_i = K * (particles[idx].density - particles[idx].rest_density);
+    let p_i = K * max(0.0, (particles[idx].density - particles[idx].rest_density));
     let neighbors = neighbor_hashes(idx);
     var sum: vec3<f32> = vec3<f32>(0.0);
     let ratio = p_i / pow(particles[idx].density, 2.0);
@@ -119,7 +107,7 @@ fn pressure_gradient(idx: u32) -> vec3<f32> {
             if distance(particles[j].position, particles[idx].position) <= CELL_SIZE {
                 // pressure mirroring: fluid uses EOS; boundary mirrors p_i
                 let is_fluid = f32(particles[j].boundary);
-                let p_j = is_fluid * K * (particles[j].density - particles[j].rest_density)
+                let p_j = is_fluid * K * max(0.0, (particles[j].density - particles[j].rest_density))
                   + (1.0 - is_fluid) * p_i;
 
                 let ratio_j = p_j / pow(particles[j].density, 2.0);
@@ -130,13 +118,11 @@ fn pressure_gradient(idx: u32) -> vec3<f32> {
     return sum;
 }
 
-
-
 @compute
 @workgroup_size(256)
 fn simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
     var particle: Particle = particles[gid.x];
-    if (particle.boundary == 0u) {
+    if particle.boundary == 0u {
         output_particles[gid.x] = particle;
         return;
     }
