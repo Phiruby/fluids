@@ -17,27 +17,24 @@ struct Vertex {
     normal: vec3<f32>,
 }
 
-// marching cubes will be performed over the grid starting at BOTTOM_LEFT.
-// Domain matches the fluid container in lib.rs (with a small pad).
-// N = voxels per axis to mesh. EDGE_N = N+1 corner/edge-owner grid so every
-// voxel (including the +boundary faces) can resolve all 12 shared edges.
+struct McParams {
+    iso_level: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.25, 0.0, -1.05);
 const N: u32 = 40;
 const EDGE_N: u32 = N + 1u;
-
 const MARCHING_CUBES_CELL_SIZE: f32 = 0.05;
 
-// the cell size is the size used in spatial hashing, separate from marching cubes
 const CELL_SIZE: f32 = 0.1;
 const HASHTABLE_SIZE: u32 = 8192u;
 const SIGMA: f32 = 8.0 / (3.14159 * pow(CELL_SIZE, 3.0));
-const DT: f32 = 0.002;
-const K: f32 = 0.5;
 
-// Classic Paul Bourke / Lorensen edge + triangle tables (converted from GLSL).
-// Sentinel in TRI_TABLE is 0xffffffff.
 const EDGE_TABLE: array<u32, 256> = array<u32, 256>(
-    0x0u, 0x109u, 0x203u, 0x30au, 0x406u, 0x50fu, 0x605u, 0x70cu,
+0x0u, 0x109u, 0x203u, 0x30au, 0x406u, 0x50fu, 0x605u, 0x70cu,
     0x80cu, 0x905u, 0xa0fu, 0xb06u, 0xc0au, 0xd03u, 0xe09u, 0xf00u,
     0x190u, 0x99u, 0x393u, 0x29au, 0x596u, 0x49fu, 0x795u, 0x69cu,
     0x99cu, 0x895u, 0xb9fu, 0xa96u, 0xd9au, 0xc93u, 0xf99u, 0xe90u,
@@ -330,13 +327,6 @@ const TRI_TABLE: array<array<u32, 16>, 256> = array<array<u32, 16>, 256>(
     array(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu)
 );
 
-struct McParams {
-    iso_level: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
-}
-
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> hash_offsets: array<vec2<u32>>;
 @group(0) @binding(2) var<storage, read_write> edge_mask: array<u32>;
@@ -377,7 +367,6 @@ fn neighbor_hashes(pos: vec3<f32>) -> array<u32, 27> {
     return neighbors;
 }
 
-// cubic spline kernel (L2 support radius = CELL_SIZE); must match quantities.wgsl
 fn kernel_weight(pos_i: vec3<f32>, pos_j: vec3<f32>) -> f32 {
     let q = distance(pos_j, pos_i) / CELL_SIZE;
     if 0.0 <= q && q <= 0.5 {

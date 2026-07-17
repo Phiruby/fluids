@@ -81,15 +81,16 @@ fn viscous_force(idx: u32) -> vec3<f32> {
         let end = offset.y;
         for (var j: u32 = start; j < end; j++) {
             if distance(particles[j].position, particles[idx].position) <= CELL_SIZE {
+                let is_fluid = f32(particles[j].boundary);
                 let v_j = particles[j].mass / particles[j].density;
                 let x_ij = particles[idx].position - particles[j].position;
                 let v_ij = particles[idx].velocity - particles[j].velocity;
                 let grad = kernel_gradient(idx, j);
-                sum += v_j * dot(v_ij, x_ij) / (dot(x_ij, x_ij) + 0.01 * pow(CELL_SIZE, 2.0)) * grad;
+                sum += is_fluid * v_j * dot(v_ij, x_ij) / (dot(x_ij, x_ij) + 0.01 * pow(CELL_SIZE, 2.0)) * grad;
             }
         }
     }
-    return sum;
+    return 10.0 * sum;
 }
 
 // Eq (53) and the simple pressure formula in section 4.4. Output is nabla pressure / density (pressure acceleration)
@@ -109,13 +110,26 @@ fn pressure_gradient(idx: u32) -> vec3<f32> {
                 let is_fluid = f32(particles[j].boundary);
                 let p_j = is_fluid * K * max(0.0, (particles[j].density - particles[j].rest_density))
                   + (1.0 - is_fluid) * p_i;
-
                 let ratio_j = p_j / pow(particles[j].density, 2.0);
-                sum -= particles[j].mass * (ratio + ratio_j) * kernel_gradient(idx, j);
+                var delta = particles[j].mass * (ratio + ratio_j) * kernel_gradient(idx, j);
+                sum -= delta;
             }
         }
     }
     return sum;
+}
+
+fn height_color(y: f32) -> vec3<f32> {
+    let t = clamp((y - 0.05) / 1.1, 0.0, 1.0);
+    if t < 0.33 {
+        let u = t / 0.33;
+        return mix(vec3<f32>(0.05, 0.25, 0.95), vec3<f32>(0.1, 0.85, 0.85), u);
+    } else if t < 0.66 {
+        let u = (t - 0.33) / 0.33;
+        return mix(vec3<f32>(0.1, 0.85, 0.85), vec3<f32>(0.95, 0.9, 0.15), u);
+    }
+    let u = (t - 0.66) / 0.34;
+    return mix(vec3<f32>(0.95, 0.9, 0.15), vec3<f32>(0.95, 0.2, 0.1), u);
 }
 
 @compute
@@ -128,11 +142,15 @@ fn simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let density = particle.density;
-    let viscosity = viscous_force(gid.x) / density;
+    // I am unsure why I am having to multiply by 200.
+    // f_visc = mu * (nabla^2 v). But mu=nu * density. So scaling by nu makes things smoother (again, not sure why
+    // given that the viscocity force needs to be multiplied by mu, not nu)
+    let viscosity = 200.0 * viscous_force(gid.x) / density;
     let pressure_acceleration = pressure_gradient(gid.x);
     let dv = (viscosity + pressure_acceleration + vec3<f32>(0.0, -9.81, 0.0)) * DT;
     particle.velocity += dv;
     particle.position += particle.velocity * DT;
+    particle.normal = height_color(particle.position.y);
     output_particles[gid.x] = particle;
 }
 

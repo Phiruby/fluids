@@ -10,7 +10,6 @@ struct Particle {
     boundary: u32,
 }
 
-const NU: f32 = 0.3; // viscosity
 // NOTE: this should be synced with spatial_hash.wgsl
 const CELL_SIZE: f32 = 0.1;
 const HASHTABLE_SIZE: u32 = 8192u;

@@ -3,16 +3,13 @@ mod graphics;
 mod physics;
 mod texture;
 use crate::camera::CameraController;
-use crate::graphics::compute::PhysicsPipeline;
 use crate::graphics::{
-    MarchingCubes, MarchingCubesRenderPipeline, MeshRenderPipeline, RayPipeline, RenderPipeline,
+    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, WireframeBoxPipeline,
 };
 use crate::physics::{
-    ContainerBoundary, Cube, CubicKernel, FluidParticle, FluidSim, assign_rest_densities,
-    fluid_cube,
+    ContainerBoundary, CubicKernel, FluidParticle, FluidSim, assign_rest_densities, fluid_cube,
 };
 use crate::texture::Texture;
-use cgmath::SquareMatrix;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -24,7 +21,7 @@ use winit::{
 };
 
 use bytemuck;
-use cgmath;
+use cgmath::SquareMatrix;
 use nalgebra::Vector3;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -36,43 +33,21 @@ enum FluidRenderMode {
     Particles,
     MarchingCubes,
 }
-
-/// Switch fluid visualization: instanced particles vs marching-cubes isosurface.
-const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::MarchingCubes;
+// marching cubes slow and bad :(
+const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::Particles;
 
 const FLUID_GRID_N: usize = 20;
-const FLUID_SPACING: f32 = 0.025;
-const FLUID_PARTICLE_RADIUS: f32 = 0.02;
-const FLUID_ORIGIN: [f32; 3] = [-0.6, 0.2, -0.2];
+const FLUID_SPACING: f32 = 0.04;
+const FLUID_PARTICLE_RADIUS: f32 = 0.014;
+const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.12, -0.7];
 const FLUID_CELL_SIZE: f32 = 0.1;
-const FLUID_CONTAINER_LAYERS: usize = 5;
+const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
-/// Mouse-wheel / [ ] step size for the isosurface slider.
 const ISO_LEVEL_STEP: f32 = 100.0;
 
-pub(crate) struct Ray {
-    start: cgmath::Point3<f32>,
-    end: cgmath::Point3<f32>,
-}
+const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
+const CONTAINER_MAX: [f32; 3] = [0.1, 1.85, 0.8];
 
-impl Ray {
-    pub fn project_to(&self, axis: Vector3<f32>) -> Vector3<f32> {
-        let e = Vector3::new(1.0, 1.0, 1.0);
-        let axis = axis.normalize();
-        let start = Vector3::new(self.start.x, self.start.y, self.start.z);
-        let end = Vector3::new(self.end.x, self.end.y, self.end.z);
-        let sum_r0 = e.dot(&start);
-        let dir = (end - start).normalize();
-        let sum_r = e.dot(&dir);
-        let sum_v = e.dot(&axis);
-        let u = (sum_r0 + sum_r0 * sum_r) / (1.0 + sum_r * sum_v);
-        let t = (sum_r0 - u * sum_v) / dir.norm();
-        let closest_to_axis = start + dir * t.max(0.0);
-        // project this to the axis
-        let projected = axis * closest_to_axis.dot(&axis);
-        projected
-    }
-}
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
     cgmath::Vector4::new(1.0, 0.0, 0.0, 0.0),
@@ -80,49 +55,6 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_co
     cgmath::Vector4::new(0.0, 0.0, 0.5, 0.0),
     cgmath::Vector4::new(0.0, 0.0, 0.5, 1.0),
 );
-
-pub(crate) struct MouseState {
-    position: winit::dpi::PhysicalPosition<f64>,
-    pub is_pressed: bool,
-}
-impl MouseState {
-    fn new() -> Self {
-        Self {
-            position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
-            is_pressed: false,
-        }
-    }
-    fn process_mouse_button(&mut self, button: MouseButton, state: ElementState) {
-        if button == MouseButton::Left && state == ElementState::Pressed {
-            self.is_pressed = true;
-        } else if button == MouseButton::Left && state == ElementState::Released {
-            self.is_pressed = false;
-        }
-    }
-    fn process_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
-        self.position = position;
-    }
-    fn world_ray(&self, camera: &Camera, viewport_width: f32, viewport_height: f32) -> Ray {
-        let viewport_width = viewport_width.max(1.0);
-        let viewport_height = viewport_height.max(1.0);
-        let ndc_x = (self.position.x as f32 / viewport_width) * 2.0 - 1.0;
-        let ndc_y = 1.0 - (self.position.y as f32 / viewport_height) * 2.0;
-        let inverse_view_projection = camera
-            .build_view_projection_matrix()
-            .invert()
-            .expect("camera view projection matrix must be invertible");
-        let near_clip = cgmath::Vector4::new(ndc_x, ndc_y, 0.0, 1.0);
-        let far_clip = cgmath::Vector4::new(ndc_x, ndc_y, 1.0, 1.0);
-        let near_world = inverse_view_projection * near_clip;
-        let far_world = inverse_view_projection * far_clip;
-        let near_world = near_world.truncate() / near_world.w;
-        let far_world = far_world.truncate() / far_world.w;
-        Ray {
-            start: cgmath::Point3::new(near_world.x, near_world.y, near_world.z),
-            end: cgmath::Point3::new(far_world.x, far_world.y, far_world.z),
-        }
-    }
-}
 
 pub(crate) struct Camera {
     eye: cgmath::Point3<f32>,
@@ -148,12 +80,10 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
     window: Arc<Window>,
-    mesh_pipeline: MeshRenderPipeline,
-    ray_pipeline: RayPipeline,
+    container_pipeline: WireframeBoxPipeline,
     fluid_pipeline: RenderPipeline,
     marching_cubes: MarchingCubes,
     mc_pipeline: MarchingCubesRenderPipeline,
-    physics_pipeline: PhysicsPipeline,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -162,9 +92,6 @@ pub struct State {
     #[allow(unused)]
     camera_buffer: wgpu::Buffer,
     depth_texture: Texture,
-    #[allow(unused)]
-    object: Cube,
-    mouse_state: MouseState,
     fluid_sim: FluidSim,
 }
 
@@ -175,7 +102,6 @@ struct CameraUniform {
 }
 impl CameraUniform {
     fn new() -> Self {
-        use cgmath::SquareMatrix;
         Self {
             view_projection: cgmath::Matrix4::identity().into(),
         }
@@ -248,8 +174,8 @@ impl State {
             desired_maximum_frame_latency: 2,
         };
         let camera = Camera {
-            eye: (0.0, 1.0, 4.0).into(),
-            target: (0.0, 0.0, 0.0).into(),
+            eye: (-0.4, 1.4, 3.2).into(),
+            target: (-0.55, 0.55, -0.1).into(),
             up: (0.0, 1.0, 0.0).into(),
             aspect: config.width as f32 / config.height as f32,
             fovy: 45.0,
@@ -287,25 +213,29 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
-        let m = 10;
-        let kernel = CubicKernel::new(1.0 / (m - 1) as f32);
-        let cube = Cube::new(m, 1.0 / m as f32, &kernel);
-        let mesh_pipeline = MeshRenderPipeline::new(
+        let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
+        let container_pipeline = WireframeBoxPipeline::new(
             &device,
             &camera_bind_group_layout,
             config.format,
-            &cube.surface_indices(),
+            CONTAINER_MIN,
+            CONTAINER_MAX,
         );
-        let ray_pipeline = RayPipeline::new(&device, &camera_bind_group_layout, config.format);
-        let physics_pipeline = PhysicsPipeline::new(&device, Cube::new(m, 1.0 / m as f32, &kernel));
-        let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
 
-        // Construct: fluid cube init bounded by a cube-boundary
+        // Boundary particles stay for SPH wall forces; they are not drawn.
         let mut fluid_particles =
             fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
         let container = ContainerBoundary {
-            top_left: nalgebra::Point3::new(-1.20, 0.05, -1.0),
-            bottom_right: nalgebra::Point3::new(0.1, 1.15, 0.8),
+            top_left: nalgebra::Point3::new(
+                CONTAINER_MIN[0],
+                CONTAINER_MIN[1],
+                CONTAINER_MIN[2],
+            ),
+            bottom_right: nalgebra::Point3::new(
+                CONTAINER_MAX[0],
+                CONTAINER_MAX[1],
+                CONTAINER_MAX[2],
+            ),
             nlayers: FLUID_CONTAINER_LAYERS,
             spacing: FLUID_SPACING / 2.0,
         };
@@ -313,6 +243,7 @@ impl State {
         assign_rest_densities(
             &mut fluid_particles,
             &mut boundary_points,
+            FLUID_SPACING,
             &CubicKernel::new(FLUID_CELL_SIZE),
         );
         fluid_particles.append(&mut boundary_points);
@@ -336,20 +267,16 @@ impl State {
             config,
             is_surface_configured: false,
             window,
-            mesh_pipeline,
-            ray_pipeline,
+            container_pipeline,
             fluid_pipeline,
             marching_cubes,
             mc_pipeline,
-            physics_pipeline,
             camera,
             camera_controller: CameraController::new(),
             camera_bind_group,
             camera_buffer,
             camera_uniform,
             depth_texture,
-            object: cube,
-            mouse_state: MouseState::new(),
             fluid_sim,
         })
     }
@@ -400,9 +327,6 @@ impl State {
                 label: Some("Command encoder for rendering"),
             });
 
-        self.physics_pipeline
-            .compute(&self.device, &self.queue, &mut encoder);
-
         self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
 
         if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
@@ -423,9 +347,9 @@ impl State {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -443,12 +367,6 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-
-            self.mesh_pipeline.draw(
-                &mut render_pass,
-                &self.camera_bind_group,
-                &self.physics_pipeline.get_output_buffer(),
-            );
 
             match FLUID_RENDER_MODE {
                 FluidRenderMode::Particles => {
@@ -470,7 +388,7 @@ impl State {
                 }
             }
 
-            self.ray_pipeline
+            self.container_pipeline
                 .draw(&mut render_pass, &self.camera_bind_group);
         }
 
@@ -517,13 +435,11 @@ impl State {
 
     fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
         self.camera_controller.process_mouse_button(button, state);
-        self.mouse_state.process_mouse_button(button, state);
     }
 
     fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
         self.camera_controller
             .process_cursor_moved(position, &mut self.camera);
-        self.mouse_state.process_cursor_moved(position);
     }
 
     fn update(&mut self) {
@@ -534,15 +450,6 @@ impl State {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
-        let ray = self.mouse_state.world_ray(
-            &self.camera,
-            self.config.width as f32,
-            self.config.height as f32,
-        );
-        self.ray_pipeline
-            .update(&self.queue, ray.start, ray.end, [0.2, 1.0, 0.2]);
-        self.physics_pipeline
-            .update(&self.queue, ray.start, ray.end, self.mouse_state.is_pressed);
     }
 }
 

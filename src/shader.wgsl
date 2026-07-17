@@ -13,13 +13,6 @@ struct VertexInput {
     @location(4) boundary: u32,
 }
 
-struct MeshVertexInput {
-    @location(0) position: vec3<f32>,
-    // NOTE: for now Particle.normal is used as mesh color
-    @location(1) color: vec3<f32>,
-    @location(2) renderable: u32,
-}
-
 struct McVertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -67,28 +60,11 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     return particle_out(input, input.color, 1.0);
 }
 
-// for bounadry particles
-@vertex
-fn vs_boundary(input: VertexInput) -> VertexOutput {
-    if input.boundary != 0u { return culled(); }
-    return particle_out(input, vec3<f32>(0.7, 0.7, 0.75), 0.005);
-}
-
 @vertex
 fn vs_line_main(input: LineVertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.color = input.color;
     out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
-    out.alpha = 1.0;
-    out.clip_position = camera.view_proj * vec4<f32>(input.position, 1.0);
-    return out;
-}
-
-@vertex
-fn vs_mesh_main(input: MeshVertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.color = input.color;
-    out.world_normal = vec3<f32>(0.0, 0.0, 1.0);
     out.alpha = 1.0;
     out.clip_position = camera.view_proj * vec4<f32>(input.position, 1.0);
     return out;

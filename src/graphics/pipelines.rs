@@ -1,7 +1,5 @@
-use crate::graphics::Vertex;
 use crate::graphics::{PipelineInfo, PipelineState, create_pipeline};
 use crate::physics::FluidParticle;
-use cgmath::Point3;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -102,10 +100,9 @@ fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
     (vertices, indices)
 }
 
-/// draw particles as instanced cubes
+/// draw fluid particles as instanced cubes (boundary particles are culled in the shader)
 pub struct RenderPipeline {
     fluid: PipelineState,
-    boundary: PipelineState,
     mesh_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
@@ -120,13 +117,6 @@ impl RenderPipeline {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
         let vertex_buffers = [ParticleMeshVertex::layout(), FluidParticle::instance_layout()];
-        let target = |blend| {
-            [Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(blend),
-                write_mask: wgpu::ColorWrites::ALL,
-            })]
-        };
         let fluid = create_pipeline(
             device,
             &PipelineInfo {
@@ -136,23 +126,12 @@ impl RenderPipeline {
                 primitive_topology: wgpu::PrimitiveTopology::TriangleList,
                 global_bind_group_layout,
                 vertex_buffers: &vertex_buffers,
-                fragment_targets: &target(wgpu::BlendState::REPLACE),
+                fragment_targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-            },
-        );
-        // boundary pass: drawing transparent boundaries
-        let boundary = create_pipeline(
-            device,
-            &PipelineInfo {
-                shader: &shader,
-                vertex_entry_point: "vs_boundary",
-                fragment_entry_point: "fs_main",
-                primitive_topology: wgpu::PrimitiveTopology::TriangleList,
-                global_bind_group_layout,
-                vertex_buffers: &vertex_buffers,
-                fragment_targets: &target(wgpu::BlendState::ALPHA_BLENDING),
-                depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Less,
             },
         );
@@ -169,7 +148,6 @@ impl RenderPipeline {
         });
         Self {
             fluid,
-            boundary,
             mesh_buffer,
             index_buffer,
             num_indices: indices.len() as u32,
@@ -183,78 +161,62 @@ impl RenderPipeline {
         particle_buffer: &wgpu::Buffer,
         num_instances: u32,
     ) {
-        for pass in [&self.fluid, &self.boundary] {
-            pass.bind(render_pass, global_bind_group);
-            render_pass.set_vertex_buffer(0, self.mesh_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, particle_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..num_instances);
-        }
-    }
-}
-
-pub struct MeshRenderPipeline {
-    pipeline: PipelineState,
-    index_buffer: wgpu::Buffer,
-    num_indices: u32,
-}
-
-impl MeshRenderPipeline {
-    pub fn new(
-        device: &wgpu::Device,
-        global_bind_group_layout: &wgpu::BindGroupLayout,
-        surface_format: wgpu::TextureFormat,
-        indices: &[u16],
-    ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
-        let pipeline = create_pipeline(
-            device,
-            &PipelineInfo {
-                shader: &shader,
-                vertex_entry_point: "vs_mesh_main",
-                fragment_entry_point: "fs_main",
-                primitive_topology: wgpu::PrimitiveTopology::TriangleList,
-                global_bind_group_layout,
-                vertex_buffers: &[Vertex::layout()],
-                fragment_targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-            },
-        );
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Mesh index buffer"),
-            contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        Self {
-            pipeline,
-            index_buffer,
-            num_indices: indices.len() as u32,
-        }
-    }
-
-    pub fn update(&mut self, _queue: &wgpu::Queue, _vertices: &[Vertex]) {
-        // TODO: now positions come from compute shader buffer
-    }
-
-    pub fn draw(
-        &self,
-        render_pass: &mut wgpu::RenderPass,
-        global_bind_group: &wgpu::BindGroup,
-        particle_buffer: &wgpu::Buffer,
-    ) {
-        self.pipeline.bind(render_pass, global_bind_group);
-        render_pass.set_vertex_buffer(0, particle_buffer.slice(..));
+        self.fluid.bind(render_pass, global_bind_group);
+        render_pass.set_vertex_buffer(0, self.mesh_buffer.slice(..));
+        render_pass.set_vertex_buffer(1, particle_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+        render_pass.draw_indexed(0..self.num_indices, 0, 0..num_instances);
     }
 }
 
-/// Renders the compact marching-cubes surface (indirect draw).
+fn box_wireframe_vertices(min: [f32; 3], max: [f32; 3], color: [f32; 3]) -> [LineVertex; 24] {
+    let corners = [
+        [min[0], min[1], min[2]],
+        [max[0], min[1], min[2]],
+        [max[0], max[1], min[2]],
+        [min[0], max[1], min[2]],
+        [min[0], min[1], max[2]],
+        [max[0], min[1], max[2]],
+        [max[0], max[1], max[2]],
+        [min[0], max[1], max[2]],
+    ];
+    let edges = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ];
+    let mut verts = [LineVertex {
+        position: [0.0; 3],
+        color,
+    }; 24];
+    for (i, &(a, b)) in edges.iter().enumerate() {
+        verts[i * 2] = LineVertex {
+            position: corners[a],
+            color,
+        };
+        verts[i * 2 + 1] = LineVertex {
+            position: corners[b],
+            color,
+        };
+    }
+    verts
+}
+
+pub struct WireframeBoxPipeline {
+    pipeline: PipelineState,
+    vertex_buffer: wgpu::Buffer,
+    num_vertices: u32,
+}
+
 pub struct MarchingCubesRenderPipeline {
     pipeline: PipelineState,
 }
@@ -302,16 +264,13 @@ impl MarchingCubesRenderPipeline {
     }
 }
 
-pub struct RayPipeline {
-    pipeline: PipelineState,
-    vertex_buffer: wgpu::Buffer,
-}
-
-impl RayPipeline {
+impl WireframeBoxPipeline {
     pub fn new(
         device: &wgpu::Device,
         global_bind_group_layout: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
+        min: [f32; 3],
+        max: [f32; 3],
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
         let pipeline = create_pipeline(
@@ -332,45 +291,22 @@ impl RayPipeline {
                 depth_compare: wgpu::CompareFunction::LessEqual,
             },
         );
+        let verts = box_wireframe_vertices(min, max, [0.25, 0.95, 0.35]);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Ray buffer"),
-            contents: bytemuck::cast_slice(
-                &[LineVertex {
-                    position: [0.0; 3],
-                    color: [0.2, 1.0, 0.2],
-                }; 2],
-            ),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            label: Some("Container wireframe"),
+            contents: bytemuck::cast_slice(&verts),
+            usage: wgpu::BufferUsages::VERTEX,
         });
         Self {
             pipeline,
             vertex_buffer,
+            num_vertices: verts.len() as u32,
         }
-    }
-
-    pub fn update(
-        &mut self,
-        queue: &wgpu::Queue,
-        start: Point3<f32>,
-        end: Point3<f32>,
-        color: [f32; 3],
-    ) {
-        let verts = [
-            LineVertex {
-                position: start.into(),
-                color,
-            },
-            LineVertex {
-                position: end.into(),
-                color,
-            },
-        ];
-        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&verts));
     }
 
     pub fn draw(&self, render_pass: &mut wgpu::RenderPass, global_bind_group: &wgpu::BindGroup) {
         self.pipeline.bind(render_pass, global_bind_group);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.draw(0..2, 0..1);
+        render_pass.draw(0..self.num_vertices, 0..1);
     }
 }
