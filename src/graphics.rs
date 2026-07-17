@@ -2,9 +2,11 @@ use crate::texture::Texture;
 use wgpu;
 
 pub mod compute;
+pub mod marching_cubes;
 mod pipelines;
 use flume::bounded;
-pub use pipelines::{MeshRenderPipeline, RayPipeline, RenderPipeline};
+pub use pipelines::{MarchingCubesRenderPipeline, MeshRenderPipeline, RayPipeline, RenderPipeline};
+pub use marching_cubes::MarchingCubes;
 use std::fmt::Debug;
 
 #[repr(C)]

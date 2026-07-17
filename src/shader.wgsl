@@ -20,6 +20,11 @@ struct MeshVertexInput {
     @location(2) renderable: u32,
 }
 
+struct McVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+}
+
 struct LineVertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
@@ -84,6 +89,16 @@ fn vs_mesh_main(input: MeshVertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.color = input.color;
     out.world_normal = vec3<f32>(0.0, 0.0, 1.0);
+    out.alpha = 1.0;
+    out.clip_position = camera.view_proj * vec4<f32>(input.position, 1.0);
+    return out;
+}
+
+@vertex
+fn vs_mc_main(input: McVertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.color = vec3<f32>(0.2, 0.5, 0.95);
+    out.world_normal = input.normal;
     out.alpha = 1.0;
     out.clip_position = camera.view_proj * vec4<f32>(input.position, 1.0);
     return out;

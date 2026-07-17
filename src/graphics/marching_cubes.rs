@@ -1,17 +1,52 @@
-use crate::graphics::BufferDebug;
-use crate::physics::FluidParticle;
+use crate::physics::PrefixSum;
 use wgpu::util::DeviceExt;
+
 const WG_SIZE: u32 = 256;
-const RADIX_BUCKETS: u32 = 16;
-const RADIX_PASSES: usize = 8;
-const HASHTABLE_SIZE: u64 = 8192;
+const GRID_N: u32 = 40;
+const EDGE_N: u32 = GRID_N + 1;
+const NUM_VOXELS: u32 = GRID_N * GRID_N * GRID_N;
+const NUM_EDGE_CELLS: u32 = EDGE_N * EDGE_N * EDGE_N;
+const NUM_EDGES: u32 = 3 * NUM_EDGE_CELLS;
+const MAX_INDICES_PER_VOXEL: u32 = 15;
+const DEFAULT_ISO_LEVEL: f32 = 2000.0; // ~0.25 × typical rest density (~8e3)
+const ISO_LEVEL_MIN: f32 = 100.0;
+const ISO_LEVEL_MAX: f32 = 10000.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct SortUniform {
-    iteration: u32,
-    num_particles: u32,
-    _pad: [u32; 2],
+struct McParams {
+    iso_level: f32,
+    _pad: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MarchingCubesVertex {
+    pub position: [f32; 3],
+    _pad0: f32,
+    pub normal: [f32; 3],
+    _pad1: f32,
+}
+
+impl MarchingCubesVertex {
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
+        }
+    }
 }
 
 fn pipeline(
@@ -30,188 +65,430 @@ fn pipeline(
     })
 }
 
-struct ActiveEdges ();
+fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
 
-impl ActiveEdges {
-    pub fn new(device: &wgpu::Device) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("marchine_cubes.wgsl"));
-        // Explicit layout: auto layout from `build_hash_table` only sees 2 bindings.
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("marching cubes - active edges"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
+fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn mc_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            storage_entry(0, true),
+            storage_entry(1, true),
+            storage_entry(2, false),
+            storage_entry(3, false),
+            storage_entry(4, false),
+            storage_entry(5, false),
+            uniform_entry(6),
+        ],
+    })
+}
+
+/// count → prefix-sum → write compact index buffer
+struct CompactIndices {
+    count: wgpu::ComputePipeline,
+    write: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    prefix_sum: PrefixSum,
+    counts: wgpu::Buffer,
+    offsets: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    /// DrawIndexedIndirect: [index_count, instance_count, first_index, base_vertex, first_instance]
+    indirect: wgpu::Buffer,
+    scan_count: u32,
+}
+
+impl CompactIndices {
+    fn new(device: &wgpu::Device, module: &wgpu::ShaderModule) -> Self {
+        let layout = mc_bind_group_layout(device, "mc compact indices");
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("spatial hash"),
+            label: Some("mc compact indices"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let hash = pipeline(device, &pipeline_layout, &module, "build_hash_table");
-        let histogram = pipeline(device, &pipeline_layout, &module, "histogram_shader");
-        let prefix = pipeline(device, &pipeline_layout, &module, "prefix_sum_shader");
-        let scatter = pipeline(device, &pipeline_layout, &module, "scatter_shader");
-        let reset_hash_offsets = pipeline(device, &pipeline_layout, &module, "clear_hash_offsets");
+        let count = pipeline(device, &pipeline_layout, module, "count_indices");
+        let write = pipeline(device, &pipeline_layout, module, "write_indices");
+
+        let scan_count = (NUM_VOXELS + 1).next_multiple_of(512);
+        let prefix_sum = PrefixSum::new(device, scan_count);
+        let usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
 
         Self {
-            hash,
-            histogram,
-            prefix,
-            scatter,
-            reset_hash_offsets,
-            hash_offsets,
+            count,
+            write,
             layout,
-            uniforms,
-            histogram_buf,
-            hash_offsets_buf,
-            sorted,
-            max_particles,
-            buffer_debug: BufferDebug::new(
-                device,
-                max_particles as u64 * std::mem::size_of::<FluidParticle>() as u64,
-            ),
+            prefix_sum,
+            counts: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mc index counts"),
+                size: scan_count as u64 * 4,
+                usage,
+                mapped_at_creation: false,
+            }),
+            offsets: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mc index offsets"),
+                size: scan_count as u64 * 4,
+                usage,
+                mapped_at_creation: false,
+            }),
+            indices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mc compact indices"),
+                size: NUM_VOXELS as u64 * MAX_INDICES_PER_VOXEL as u64 * 4,
+                usage: usage | wgpu::BufferUsages::INDEX,
+                mapped_at_creation: false,
+            }),
+            indirect: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mc draw indirect"),
+                contents: bytemuck::cast_slice(&[0u32, 1, 0, 0, 0]),
+                usage: wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+            }),
+            scan_count,
         }
+    }
+
+    fn run(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        particles: &wgpu::Buffer,
+        hash_offsets: &wgpu::Buffer,
+        edge_offsets: &wgpu::Buffer,
+        vertices: &wgpu::Buffer,
+        params: &wgpu::Buffer,
+    ) {
+        let bg_counts = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: particles.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: hash_offsets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: edge_offsets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: vertices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.counts.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.indices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.count);
+            pass.set_bind_group(0, &bg_counts, &[]);
+            pass.dispatch_workgroups(NUM_VOXELS.div_ceil(WG_SIZE), 1, 1);
+        }
+
+        self.prefix_sum.get_prefix_sum(
+            device,
+            encoder,
+            &self.counts,
+            &self.offsets,
+            self.scan_count,
+        );
+
+        let bg_write = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: particles.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: hash_offsets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: edge_offsets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: vertices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.offsets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.indices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.write);
+            pass.set_bind_group(0, &bg_write, &[]);
+            pass.dispatch_workgroups(NUM_VOXELS.div_ceil(WG_SIZE), 1, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(
+            &self.offsets,
+            NUM_VOXELS as u64 * 4,
+            &self.indirect,
+            0,
+            4,
+        );
+    }
+
+    fn index_buffer(&self) -> &wgpu::Buffer {
+        &self.indices
+    }
+
+    fn indirect_buffer(&self) -> &wgpu::Buffer {
+        &self.indirect
     }
 }
 
-/// Perform marching cubes; steps inspired by https://www.willusher.io/graphics/2024/04/22/webgpu-marching-cubes/#conclusion-webgpu-performance-vs-vulkan
-/// but modified to output vertices AND indices (to avoid duplicate vertices). Steps:
-/// 1. Determine active edges;
-/// 2. Count number of unique vertices based on above; compute offsets per thread
-/// 3. Create the vertices
-/// 4. For each voxel, use edge index to find the vertex index in the buffer (can use offsets buffer from step 2)
 pub struct MarchingCubes {
-    level_set_threshold: f32
+    active_edges: wgpu::ComputePipeline,
+    add_vertices: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    prefix_sum: PrefixSum,
+    edge_mask: wgpu::Buffer,
+    edge_offsets: wgpu::Buffer,
+    vertices: wgpu::Buffer,
+    params_buf: wgpu::Buffer,
+    compact_indices: CompactIndices,
+    edge_scan_count: u32,
+    iso_level: f32,
 }
 
 impl MarchingCubes {
-    pub fn new(device: &wgpu::Device, particles: &[FluidParticle]) -> Self {
-        let num_particles = particles.len() as u32;
+    pub fn new(device: &wgpu::Device) -> Self {
+        let module = device.create_shader_module(wgpu::include_wgsl!("marching_cubes.wgsl"));
+        let layout = mc_bind_group_layout(device, "marching cubes");
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("marching cubes"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+
+        let active_edges = pipeline(device, &pipeline_layout, &module, "active_edges");
+        let add_vertices = pipeline(device, &pipeline_layout, &module, "add_vertices");
+        let compact_indices = CompactIndices::new(device, &module);
+
+        let edge_scan_count = (NUM_EDGES + 1).next_multiple_of(512);
+        let prefix_sum = PrefixSum::new(device, edge_scan_count);
         let usage = wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::VERTEX
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST;
-        let buffers = std::array::from_fn(|i| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("fluid particles {i}")),
-                contents: bytemuck::cast_slice(particles),
-                usage,
-            })
+
+        let iso_level = DEFAULT_ISO_LEVEL;
+        let params = McParams {
+            iso_level,
+            _pad: [0.0; 3],
+        };
+        let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mc params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+
         Self {
-            spatial_hash: SpatialHashGPU::new(device, num_particles),
-            compute_densities: ComputeDensities::new(device),
-            simulation: Simulation::new(device),
-            particles: buffers,
-            num_particles,
-            current: 0,
-            debugger: BufferDebug::new(
-                device,
-                num_particles as u64 * std::mem::size_of::<FluidParticle>() as u64,
-            ),
+            active_edges,
+            add_vertices,
+            layout,
+            prefix_sum,
+            edge_mask: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mc edge mask"),
+                size: edge_scan_count as u64 * 4,
+                usage,
+                mapped_at_creation: false,
+            }),
+            edge_offsets: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mc edge offsets"),
+                size: edge_scan_count as u64 * 4,
+                usage,
+                mapped_at_creation: false,
+            }),
+            vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mc vertices"),
+                size: NUM_EDGES as u64 * std::mem::size_of::<MarchingCubesVertex>() as u64,
+                usage: usage | wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            params_buf,
+            compact_indices,
+            edge_scan_count,
+            iso_level,
         }
     }
 
-    /// (sort, densities, integrate) and swaps the buffers
-    pub fn step(
-        &mut self,
+    pub fn iso_level(&self) -> f32 {
+        self.iso_level
+    }
+
+    pub fn set_iso_level(&mut self, queue: &wgpu::Queue, iso_level: f32) {
+        self.iso_level = iso_level.clamp(ISO_LEVEL_MIN, ISO_LEVEL_MAX);
+        let params = McParams {
+            iso_level: self.iso_level,
+            _pad: [0.0; 3],
+        };
+        queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
+    }
+
+    /// Adjust iso level by a delta (e.g. from mouse wheel). Returns the new value.
+    pub fn nudge_iso_level(&mut self, queue: &wgpu::Queue, delta: f32) -> f32 {
+        self.set_iso_level(queue, self.iso_level + delta);
+        self.iso_level
+    }
+
+    fn bind_group(
+        &self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        particles: &wgpu::Buffer,
+        hash_offsets: &wgpu::Buffer,
+        edges: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("marching cubes"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: particles.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: hash_offsets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: edges.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.vertices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.compact_indices.counts.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.compact_indices.indices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.params_buf.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    pub fn extract(
+        &self,
+        device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
+        particles: &wgpu::Buffer,
+        hash_offsets: &wgpu::Buffer,
     ) {
-        if self.num_particles == 0 {
-            return;
+        let bg_mask = self.bind_group(device, particles, hash_offsets, &self.edge_mask);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.active_edges);
+            pass.set_bind_group(0, &bg_mask, &[]);
+            pass.dispatch_workgroups(NUM_EDGE_CELLS.div_ceil(WG_SIZE), 1, 1);
         }
-        let o =
-            self.debugger
-                .read::<FluidParticle>(device, queue, &self.particles[self.current], 1);
-        dbg!(o);
-        let src = self.current;
-        let dst = 1 - self.current;
-        let hash_offsets = &self.spatial_hash.hash_offsets_buf;
 
-        self.spatial_hash.sort(
+        self.prefix_sum.get_prefix_sum(
             device,
-            queue,
             encoder,
-            &self.particles[src],
-            self.num_particles,
+            &self.edge_mask,
+            &self.edge_offsets,
+            self.edge_scan_count,
         );
-        self.compute_densities.compute(
+
+        let bg_offsets = self.bind_group(device, particles, hash_offsets, &self.edge_offsets);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.add_vertices);
+            pass.set_bind_group(0, &bg_offsets, &[]);
+            pass.dispatch_workgroups(NUM_EDGES.div_ceil(WG_SIZE), 1, 1);
+        }
+
+        self.compact_indices.run(
             device,
-            queue,
             encoder,
-            &self.particles[src],
+            particles,
             hash_offsets,
-            self.num_particles,
+            &self.edge_offsets,
+            &self.vertices,
+            &self.params_buf,
         );
-        self.simulation.run(
-            device,
-            queue,
-            encoder,
-            &self.particles[src],
-            &self.particles[dst],
-            hash_offsets,
-            self.num_particles,
-        );
-        self.current = dst;
     }
 
-    /// get the buffer w/ most recent particle state
-    pub fn particle_buffer(&self) -> &wgpu::Buffer {
-        &self.particles[self.current]
+    pub fn vertex_buffer(&self) -> &wgpu::Buffer {
+        &self.vertices
     }
 
-    pub fn num_particles(&self) -> u32 {
-        self.num_particles
+    pub fn index_buffer(&self) -> &wgpu::Buffer {
+        self.compact_indices.index_buffer()
+    }
+
+    pub fn indirect_buffer(&self) -> &wgpu::Buffer {
+        self.compact_indices.indirect_buffer()
+    }
+
+    pub fn grid_n(&self) -> u32 {
+        GRID_N
+    }
+
+    pub fn num_voxels(&self) -> u32 {
+        NUM_VOXELS
+    }
+
+    pub fn num_edges(&self) -> u32 {
+        NUM_EDGES
     }
 }

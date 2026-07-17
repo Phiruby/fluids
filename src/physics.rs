@@ -13,6 +13,7 @@ use std::ops::Add;
 
 pub use boundaries::ContainerBoundary;
 pub use fluids::FluidSim;
+pub(crate) use fluids::PrefixSum;
 pub use shapes::*;
 
 pub const FLUID_COLOR: [f32; 3] = [0.2, 0.5, 0.95];

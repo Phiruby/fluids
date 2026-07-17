@@ -4,7 +4,9 @@ mod physics;
 mod texture;
 use crate::camera::CameraController;
 use crate::graphics::compute::PhysicsPipeline;
-use crate::graphics::{MeshRenderPipeline, RayPipeline, RenderPipeline};
+use crate::graphics::{
+    MarchingCubes, MarchingCubesRenderPipeline, MeshRenderPipeline, RayPipeline, RenderPipeline,
+};
 use crate::physics::{
     ContainerBoundary, Cube, CubicKernel, FluidParticle, FluidSim, assign_rest_densities,
     fluid_cube,
@@ -30,20 +32,23 @@ use wasm_bindgen::prelude::*;
 use winit::platform::web::EventLoopExtWebSys;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum RenderMode {
+enum FluidRenderMode {
     Particles,
-    Mesh,
+    MarchingCubes,
 }
 
-const RENDER_MODE: RenderMode = RenderMode::Mesh;
+/// Switch fluid visualization: instanced particles vs marching-cubes isosurface.
+const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::MarchingCubes;
 
-const FLUID_GRID_N: usize = 10;
-const FLUID_SPACING: f32 = 0.05;
+const FLUID_GRID_N: usize = 20;
+const FLUID_SPACING: f32 = 0.025;
 const FLUID_PARTICLE_RADIUS: f32 = 0.02;
 const FLUID_ORIGIN: [f32; 3] = [-0.6, 0.2, -0.2];
 const FLUID_CELL_SIZE: f32 = 0.1;
 const FLUID_CONTAINER_LAYERS: usize = 5;
 const FLUID_WORKGROUP: usize = 256;
+/// Mouse-wheel / [ ] step size for the isosurface slider.
+const ISO_LEVEL_STEP: f32 = 100.0;
 
 pub(crate) struct Ray {
     start: cgmath::Point3<f32>,
@@ -146,6 +151,8 @@ pub struct State {
     mesh_pipeline: MeshRenderPipeline,
     ray_pipeline: RayPipeline,
     fluid_pipeline: RenderPipeline,
+    marching_cubes: MarchingCubes,
+    mc_pipeline: MarchingCubesRenderPipeline,
     physics_pipeline: PhysicsPipeline,
     camera: Camera,
     camera_controller: CameraController,
@@ -319,6 +326,9 @@ impl State {
             config.format,
             FLUID_PARTICLE_RADIUS,
         );
+        let marching_cubes = MarchingCubes::new(&device);
+        let mc_pipeline =
+            MarchingCubesRenderPipeline::new(&device, &camera_bind_group_layout, config.format);
         Ok(Self {
             surface,
             device,
@@ -329,6 +339,8 @@ impl State {
             mesh_pipeline,
             ray_pipeline,
             fluid_pipeline,
+            marching_cubes,
+            mc_pipeline,
             physics_pipeline,
             camera,
             camera_controller: CameraController::new(),
@@ -393,6 +405,15 @@ impl State {
 
         self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
 
+        if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
+            self.marching_cubes.extract(
+                &self.device,
+                &mut encoder,
+                self.fluid_sim.particle_buffer(),
+                self.fluid_sim.hash_offsets_buffer(),
+            );
+        }
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render pass"),
@@ -429,12 +450,25 @@ impl State {
                 &self.physics_pipeline.get_output_buffer(),
             );
 
-            self.fluid_pipeline.draw(
-                &mut render_pass,
-                &self.camera_bind_group,
-                self.fluid_sim.particle_buffer(),
-                self.fluid_sim.num_particles(),
-            );
+            match FLUID_RENDER_MODE {
+                FluidRenderMode::Particles => {
+                    self.fluid_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        self.fluid_sim.particle_buffer(),
+                        self.fluid_sim.num_particles(),
+                    );
+                }
+                FluidRenderMode::MarchingCubes => {
+                    self.mc_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        self.marching_cubes.vertex_buffer(),
+                        self.marching_cubes.index_buffer(),
+                        self.marching_cubes.indirect_buffer(),
+                    );
+                }
+            }
 
             self.ray_pipeline
                 .draw(&mut render_pass, &self.camera_bind_group);
@@ -450,7 +484,35 @@ impl State {
             event_loop.exit();
             return;
         }
+        if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes && is_pressed {
+            let delta = match code {
+                KeyCode::BracketRight | KeyCode::Equal => ISO_LEVEL_STEP,
+                KeyCode::BracketLeft | KeyCode::Minus => -ISO_LEVEL_STEP,
+                _ => 0.0,
+            };
+            if delta != 0.0 {
+                let iso = self.marching_cubes.nudge_iso_level(&self.queue, delta);
+                self.window
+                    .set_title(&format!("fluids — iso level {iso:.1}"));
+                return;
+            }
+        }
         self.camera_controller.process_key(code, is_pressed);
+    }
+
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        if FLUID_RENDER_MODE != FluidRenderMode::MarchingCubes {
+            return;
+        }
+        let steps = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(pos) => (pos.y as f32 / 40.0),
+        };
+        let iso = self
+            .marching_cubes
+            .nudge_iso_level(&self.queue, steps * ISO_LEVEL_STEP);
+        self.window
+            .set_title(&format!("fluids — iso level {iso:.1}"));
     }
 
     fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
@@ -605,6 +667,9 @@ impl ApplicationHandler<State> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 state.handle_cursor_moved(position);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                state.handle_mouse_wheel(delta);
             }
             _ => {}
         }

@@ -532,10 +532,6 @@ impl ComputeDensities {
                 },
             ],
         });
-        let o = self
-            .debugger
-            .read::<[f32; 3]>(device, queue, &self.debug_buffer, 1);
-        dbg!(o);
         let ndispatches = num_particles / 256;
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
@@ -657,13 +653,6 @@ impl Simulation {
                 },
             ],
         });
-        // let o = self.debugger.read::<[f32; 3]>(
-        //     device,
-        //     queue,
-        //     &self.debug_buffer,
-        //     1,
-        // );
-        // dbg!(o);
         let ndispatches = num_particles / 256;
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
@@ -751,16 +740,17 @@ impl FluidSim {
             hash_offsets,
             self.num_particles,
         );
-        let o =
-            self.debugger
-                .read::<FluidParticle>(device, queue, &self.particles[self.current], 1);
-        dbg!(o);
         self.current = dst;
     }
 
     /// get the buffer w/ most recent particle state
     pub fn particle_buffer(&self) -> &wgpu::Buffer {
         &self.particles[self.current]
+    }
+
+    /// Spatial-hash cell → particle range table used by neighbor queries / marching cubes.
+    pub fn hash_offsets_buffer(&self) -> &wgpu::Buffer {
+        &self.spatial_hash.hash_offsets_buf
     }
 
     pub fn num_particles(&self) -> u32 {

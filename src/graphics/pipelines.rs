@@ -254,6 +254,54 @@ impl MeshRenderPipeline {
     }
 }
 
+/// Renders the compact marching-cubes surface (indirect draw).
+pub struct MarchingCubesRenderPipeline {
+    pipeline: PipelineState,
+}
+
+impl MarchingCubesRenderPipeline {
+    pub fn new(
+        device: &wgpu::Device,
+        global_bind_group_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
+        let pipeline = create_pipeline(
+            device,
+            &PipelineInfo {
+                shader: &shader,
+                vertex_entry_point: "vs_mc_main",
+                fragment_entry_point: "fs_main",
+                primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+                global_bind_group_layout,
+                vertex_buffers: &[crate::graphics::marching_cubes::MarchingCubesVertex::layout()],
+                fragment_targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+            },
+        );
+        Self { pipeline }
+    }
+
+    pub fn draw(
+        &self,
+        render_pass: &mut wgpu::RenderPass,
+        global_bind_group: &wgpu::BindGroup,
+        vertices: &wgpu::Buffer,
+        indices: &wgpu::Buffer,
+        indirect: &wgpu::Buffer,
+    ) {
+        self.pipeline.bind(render_pass, global_bind_group);
+        render_pass.set_vertex_buffer(0, vertices.slice(..));
+        render_pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.draw_indexed_indirect(indirect, 0);
+    }
+}
+
 pub struct RayPipeline {
     pipeline: PipelineState,
     vertex_buffer: wgpu::Buffer,
