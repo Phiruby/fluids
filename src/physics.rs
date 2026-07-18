@@ -19,7 +19,7 @@ pub struct PhysicsVertex {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct FluidParticle {
     pub position: [f32; 3],
     _pad0: u32,

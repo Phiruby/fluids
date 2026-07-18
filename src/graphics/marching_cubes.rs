@@ -106,7 +106,10 @@ fn mc_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLa
     })
 }
 
-/// count → prefix-sum → write compact index buffer
+/// Main goal here is to write out to index buffer. for that, we need to:
+/// 1. compute number of indices needed per voxel
+/// 2. determine offsets for each voxel to write to in the index buffer (via prefix sum)
+/// 3. write the indices
 struct CompactIndices {
     count: wgpu::ComputePipeline,
     write: wgpu::ComputePipeline,
@@ -115,7 +118,6 @@ struct CompactIndices {
     counts: wgpu::Buffer,
     offsets: wgpu::Buffer,
     indices: wgpu::Buffer,
-    /// DrawIndexedIndirect: [index_count, instance_count, first_index, base_vertex, first_instance]
     indirect: wgpu::Buffer,
     scan_count: u32,
 }

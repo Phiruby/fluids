@@ -3,9 +3,10 @@ use wgpu;
 
 pub mod marching_cubes;
 mod pipelines;
+mod ssfr;
 use flume::bounded;
-pub use pipelines::{MarchingCubesRenderPipeline, RenderPipeline, WireframeBoxPipeline};
 pub use marching_cubes::MarchingCubes;
+pub use pipelines::{MarchingCubesRenderPipeline, RenderPipeline, WireframeBoxPipeline};
 use std::fmt::Debug;
 
 pub(in crate::graphics) struct PipelineInfo<'a> {
