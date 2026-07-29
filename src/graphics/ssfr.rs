@@ -196,12 +196,67 @@ impl FluidCompaction {
 }
 
 struct FluidDepth {
-    pipeline: wgpu::ComputePipeline,
+    pipeline: wgpu::RenderPipeline,
 }
 
 impl FluidDepth {
-    pub fn new(_device: &wgpu::Device) {
+    pub fn new(device: &wgpu::Device) -> Self {
         // let module = device.create_shader_module(wgpu::include_wgsl!("ssfr.wgsl"));
+        let module = device.create_shader_module(wgpu::include_wgsl!("fluid_depth.wgsl"));
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fluid_depth"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Fluid depth calculation"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let fluid_depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("depth fluid pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vertex_main"),
+                buffers: &[], // no buffers needed since we use sph buffer
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("frag_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+        });
+
+        Self {
+            pipeline: fluid_depth_pipeline,
+        }
     }
 }
 
