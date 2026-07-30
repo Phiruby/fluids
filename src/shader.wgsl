@@ -1,5 +1,8 @@
 struct CameraUniform {
-    view_proj: mat4x4<f32>,
+    view: mat4x4<f32>,
+    projection: mat4x4<f32>,
+    particle_radius: f32,
+    screen_height: f32,
 }
 
 @group(0) @binding(0)
@@ -49,7 +52,7 @@ fn particle_out(input: VertexInput, color: vec3<f32>, alpha: f32) -> VertexOutpu
     out.color = color;
     out.world_normal = input.local_normal;
     out.alpha = alpha;
-    out.clip_position = camera.view_proj * vec4<f32>(input.instance_position + input.local_position, 1.0);
+    out.clip_position = camera.projection * camera.view * vec4<f32>(input.instance_position + input.local_position, 1.0);
     return out;
 }
 
@@ -66,7 +69,7 @@ fn vs_line_main(input: LineVertexInput) -> VertexOutput {
     out.color = input.color;
     out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
     out.alpha = 1.0;
-    out.clip_position = camera.view_proj * vec4<f32>(input.position, 1.0);
+    out.clip_position = camera.projection * camera.view * vec4<f32>(input.position, 1.0);
     return out;
 }
 
@@ -76,7 +79,7 @@ fn vs_mc_main(input: McVertexInput) -> VertexOutput {
     out.color = vec3<f32>(0.2, 0.5, 0.95);
     out.world_normal = input.normal;
     out.alpha = 1.0;
-    out.clip_position = camera.view_proj * vec4<f32>(input.position, 1.0);
+    out.clip_position = camera.projection * camera.view * vec4<f32>(input.position, 1.0);
     return out;
 }
 

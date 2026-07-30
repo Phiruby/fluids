@@ -2,17 +2,25 @@
 struct CameraUniform {
     view: mat4x4<f32>,
     projection: mat4x4<f32>,
-    inv_proj: mat4x4<f32>,
     particle_radius: f32,
-    screen_height: f32}
+    screen_height: f32,
+}
 
 struct Particle {
     position: vec3<f32>,
+    velocity: vec3<f32>,
+    normal: vec3<f32>,
+    density: f32,
+    rest_density: f32,
+    mass: f32,
+    cell_hash: u32,
+    // 1 = fluid, 0 = boundary
+    boundary: u32,
 }
 
 @group(0) @binding(0)
 var<uniform> ubo: CameraUniform;
-@group(0) @binding(1) var<storage, read> particles: array<Particle>;
+@group(1) @binding(0) var<storage, read> particles: array<Particle>;
 
 struct VertexInput {
     @builtin(vertex_index) vertex_idx: u32,
@@ -59,7 +67,9 @@ fn frag_main(input: VertexOutput) -> FragmentOutput {
     let local_z = sqrt(1.0 - r) * ubo.particle_radius;
     let cummulative_depth = input.view_space.z + local_z;
     // out.view_depth = cummulative_depth;
-    out.color = vec4<f32>(cummulative_depth, cummulative_depth, cummulative_depth, 1.0);
+    let SCALE = 10.1;
+    let depth_color = clamp((abs(cummulative_depth) - 0.1 / (0.5 - 0.1)), 0.0, 1.0);
+    out.color = vec4<f32>(depth_color, depth_color, depth_color, 1.0);
 
     let proj_pos = ubo.projection * vec4<f32>(0.0, 0.0, cummulative_depth, 1.0);
     out.frag_depth = proj_pos.z / proj_pos.w;

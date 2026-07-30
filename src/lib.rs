@@ -4,7 +4,8 @@ mod physics;
 mod texture;
 use crate::camera::CameraController;
 use crate::graphics::{
-    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, WireframeBoxPipeline,
+    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, ScreenSpaceRendering,
+    WireframeBoxPipeline,
 };
 use crate::physics::{
     ContainerBoundary, CubicKernel, FluidParticle, FluidSim, assign_rest_densities, fluid_cube,
@@ -32,9 +33,10 @@ use winit::platform::web::EventLoopExtWebSys;
 enum FluidRenderMode {
     Particles,
     MarchingCubes,
+    ScreenSpaceFluidRendering,
 }
 // marching cubes slow and bad :(
-const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::Particles;
+const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRendering;
 
 const FLUID_GRID_N: usize = 20;
 const FLUID_SPACING: f32 = 0.04;
@@ -66,11 +68,11 @@ pub(crate) struct Camera {
     zfar: f32,
 }
 impl Camera {
-    fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
+    fn build_view_projection_matrix(&self) -> (cgmath::Matrix4<f32>, cgmath::Matrix4<f32>) {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
         let projection =
             cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
-        return OPENGL_TO_WGPU_MATRIX * projection * view;
+        return (OPENGL_TO_WGPU_MATRIX * projection, view);
     }
 }
 pub struct State {
@@ -83,6 +85,7 @@ pub struct State {
     container_pipeline: WireframeBoxPipeline,
     fluid_pipeline: RenderPipeline,
     marching_cubes: MarchingCubes,
+    screen_space_rendering: ScreenSpaceRendering,
     mc_pipeline: MarchingCubesRenderPipeline,
     camera: Camera,
     camera_controller: CameraController,
@@ -98,17 +101,27 @@ pub struct State {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
-    view_projection: [[f32; 4]; 4],
+    view: [[f32; 4]; 4],
+    projection: [[f32; 4]; 4],
+    particle_radius: f32,
+    screen_height: f32,
+    _pad: [f32; 2],
 }
 impl CameraUniform {
     fn new() -> Self {
         Self {
-            view_projection: cgmath::Matrix4::identity().into(),
+            view: cgmath::Matrix4::identity().into(),
+            projection: cgmath::Matrix4::identity().into(),
+            particle_radius: 0.1,
+            screen_height: 100.0,
+            _pad: [0.0; 2],
         }
     }
 
     fn update_view_projection(&mut self, camera: &Camera) {
-        self.view_projection = camera.build_view_projection_matrix().into();
+        let (projection, view) = camera.build_view_projection_matrix();
+        self.projection = projection.into();
+        self.view = view.into();
     }
 }
 impl State {
@@ -184,6 +197,8 @@ impl State {
         };
 
         let mut camera_uniform = CameraUniform::new();
+        camera_uniform.particle_radius = FLUID_PARTICLE_RADIUS;
+        camera_uniform.screen_height = config.height as f32;
         camera_uniform.update_view_projection(&camera);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera buffer"),
@@ -195,7 +210,7 @@ impl State {
                 label: Some("Camera bind group layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -222,15 +237,11 @@ impl State {
             CONTAINER_MAX,
         );
 
-        // Boundary particles stay for SPH wall forces; they are not drawn.
         let mut fluid_particles =
             fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
+        let n_fluid = fluid_particles.len() as u32;
         let container = ContainerBoundary {
-            top_left: nalgebra::Point3::new(
-                CONTAINER_MIN[0],
-                CONTAINER_MIN[1],
-                CONTAINER_MIN[2],
-            ),
+            top_left: nalgebra::Point3::new(CONTAINER_MIN[0], CONTAINER_MIN[1], CONTAINER_MIN[2]),
             bottom_right: nalgebra::Point3::new(
                 CONTAINER_MAX[0],
                 CONTAINER_MAX[1],
@@ -260,6 +271,13 @@ impl State {
         let marching_cubes = MarchingCubes::new(&device);
         let mc_pipeline =
             MarchingCubesRenderPipeline::new(&device, &camera_bind_group_layout, config.format);
+        let screen_space_rendering = ScreenSpaceRendering::new(
+            &device,
+            camera_bind_group_layout,
+            fluid_particles.len() as u32,
+            n_fluid,
+            config.format,
+        );
         Ok(Self {
             surface,
             device,
@@ -278,6 +296,7 @@ impl State {
             camera_uniform,
             depth_texture,
             fluid_sim,
+            screen_space_rendering,
         })
     }
 
@@ -290,6 +309,7 @@ impl State {
             self.is_surface_configured = true;
             self.depth_texture =
                 Texture::create_depth_texture(&self.device, &self.config, "Depth texture");
+            self.camera_uniform.screen_height = height as f32;
         }
     }
 
@@ -335,6 +355,15 @@ impl State {
                 &mut encoder,
                 self.fluid_sim.particle_buffer(),
                 self.fluid_sim.hash_offsets_buffer(),
+            );
+        }
+
+        if FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering {
+            // perform compaction (filter out boundary particles) b4 creating render pass
+            self.screen_space_rendering.prepare(
+                &self.device,
+                self.fluid_sim.particle_buffer(),
+                &mut encoder,
             );
         }
 
@@ -385,6 +414,13 @@ impl State {
                         self.marching_cubes.index_buffer(),
                         self.marching_cubes.indirect_buffer(),
                     );
+                }
+                FluidRenderMode::ScreenSpaceFluidRendering => {
+                    self.screen_space_rendering.draw(
+                        &self.device,
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                    )
                 }
             }
 

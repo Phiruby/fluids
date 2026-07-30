@@ -113,11 +113,8 @@ pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidPart
     particles
 }
 
-/// Density of a particle fully surrounded by an infinite regular lattice of the
-/// given `spacing` and per-particle `mass`. This is the "bulk" rest density: the
-/// value a particle deep inside the fluid converges to once packed.
+
 pub fn lattice_rest_density(spacing: f32, mass: f32, kernel: &CubicKernel) -> f32 {
-    // Enough lattice cells to cover the kernel support radius in every direction.
     let reach = (kernel.h / spacing).ceil() as i32;
     let mut density = 0.0;
     for i in -reach..=reach {
@@ -131,14 +128,9 @@ pub fn lattice_rest_density(spacing: f32, mass: f32, kernel: &CubicKernel) -> f3
     density
 }
 
-/// Assign a single global rest density to every particle (fluid and boundary).
-///
-/// Rather than giving each fluid particle its own initial density (which made
-/// surface particles target a low density and interior particles a high one, so
-/// they disagreed about equilibrium and never settled), we use the bulk lattice
-/// density as one uniform rho_0. The initial cube starts at or below this value,
-/// so there is no startup pressure shock, and every particle shares the same
-/// equilibrium it can pack toward.
+/// all particles given the same rest density (and initial density as well):
+/// helped stabilize sim since boundary fluid particles naturally are less densed,
+/// which was causing all sorts of problems 
 pub fn assign_rest_densities(
     particles: &mut [FluidParticle],
     boundary_particles: &mut [FluidParticle],

@@ -1,5 +1,5 @@
 use crate::physics::{FluidParticle, PrefixSum};
-
+use crate::texture::Texture;
 /// After SPH sim, the particles buffer contains a mix of
 /// boundary and fluid particles. this performs compaction
 /// to get a buffer with just fluid particles
@@ -197,40 +197,33 @@ impl FluidCompaction {
 
 struct FluidDepth {
     pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
 }
 
 impl FluidDepth {
-    pub fn new(device: &wgpu::Device) -> Self {
-        // let module = device.create_shader_module(wgpu::include_wgsl!("ssfr.wgsl"));
+    pub fn new(
+        device: &wgpu::Device,
+        uniform_bind_group_layout: wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        // TODO: we can use create_pipeline from crate::graphics
         let module = device.create_shader_module(wgpu::include_wgsl!("fluid_depth.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fluid_depth"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
+                count: None,
+            }],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Fluid depth calculation"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&uniform_bind_group_layout), Some(&layout)],
             immediate_size: 0,
         });
         let fluid_depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -252,17 +245,110 @@ impl FluidDepth {
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
         });
 
         Self {
             pipeline: fluid_depth_pipeline,
+            layout,
         }
+    }
+
+    pub fn draw(
+        &self,
+        device: &wgpu::Device,
+        fluid_particles: &wgpu::Buffer,
+        nparticles: u32,
+        render_pass: &mut wgpu::RenderPass,
+        uniforms: &wgpu::BindGroup,
+    ) {
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, uniforms, &[]);
+        let particles_binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: fluid_particles.as_entire_binding(),
+            }],
+        });
+        render_pass.set_bind_group(1, &particles_binding, &[]);
+        // TODO: should be instanced with rectangles?
+        render_pass.draw(0..4, 0..nparticles);
     }
 }
 
 /// Perform screen-space fluid rendering
 /// see https://wstahw.win.tue.nl/edu/2IV06/andrei/particle_rendering/provided/p91-van_der_laan.pdf
-pub struct ScreenSpaceRendering {}
+pub struct ScreenSpaceRendering {
+    compaction: FluidCompaction,
+    depth: FluidDepth,
+    n_fluid: u32,
+}
+
+impl ScreenSpaceRendering {
+    pub fn new(
+        device: &wgpu::Device,
+        uniform_bind_group_layout: wgpu::BindGroupLayout,
+        nparticles: u32,
+        n_fluid: u32,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self {
+            compaction: FluidCompaction::new(device, nparticles),
+            depth: FluidDepth::new(device, uniform_bind_group_layout, surface_format),
+            n_fluid,
+        }
+    }
+
+    /// performs fluid compaction (i.e. filter boundary particles out of the SPH buffer).
+    /// make sure to use same encoder. this should be called before using draw()
+    pub fn prepare(
+        &self,
+        device: &wgpu::Device,
+        particles: &wgpu::Buffer,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        self.compaction.compact(device, particles, encoder);
+    }
+
+    pub fn draw(
+        &self,
+        device: &wgpu::Device,
+        render_pass: &mut wgpu::RenderPass,
+        uniforms: &wgpu::BindGroup,
+    ) {
+        self.depth.draw(
+            device,
+            self.compaction.get_compact_fluids_buffer(),
+            self.n_fluid,
+            render_pass,
+            uniforms,
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

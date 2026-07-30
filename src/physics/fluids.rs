@@ -47,7 +47,6 @@ impl PrefixSum {
     pub fn new(device: &wgpu::Device, max_particles: u32) -> Self {
         assert!(max_particles <= 512 * 512, "Max particles must be <= 512^2");
         let module = device.create_shader_module(wgpu::include_wgsl!("prefix_sum.wgsl"));
-        // Explicit layout: auto layout from `build_hash_table` only sees 2 bindings.
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("prefix sum"),
             entries: &[
