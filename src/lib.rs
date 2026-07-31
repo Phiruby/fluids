@@ -38,8 +38,8 @@ enum FluidRenderMode {
 // marching cubes slow and bad :(
 const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRendering;
 
-const FLUID_GRID_N: usize = 20;
-const FLUID_SPACING: f32 = 0.04;
+const FLUID_GRID_N: usize = 30;
+const FLUID_SPACING: f32 = 0.03;
 const FLUID_PARTICLE_RADIUS: f32 = 0.014;
 const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.12, -0.7];
 const FLUID_CELL_SIZE: f32 = 0.1;
@@ -415,13 +415,11 @@ impl State {
                         self.marching_cubes.indirect_buffer(),
                     );
                 }
-                FluidRenderMode::ScreenSpaceFluidRendering => {
-                    self.screen_space_rendering.draw(
-                        &self.device,
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                    )
-                }
+                FluidRenderMode::ScreenSpaceFluidRendering => self.screen_space_rendering.draw(
+                    &self.device,
+                    &mut render_pass,
+                    &self.camera_bind_group,
+                ),
             }
 
             self.container_pipeline

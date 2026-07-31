@@ -203,7 +203,7 @@ struct FluidDepth {
 impl FluidDepth {
     pub fn new(
         device: &wgpu::Device,
-        uniform_bind_group_layout: wgpu::BindGroupLayout,
+        uniform_bind_group_layout: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
         // TODO: we can use create_pipeline from crate::graphics
@@ -223,7 +223,7 @@ impl FluidDepth {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Fluid depth calculation"),
-            bind_group_layouts: &[Some(&uniform_bind_group_layout), Some(&layout)],
+            bind_group_layouts: &[Some(uniform_bind_group_layout), Some(&layout)],
             immediate_size: 0,
         });
         let fluid_depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -300,11 +300,129 @@ impl FluidDepth {
     }
 }
 
+struct FluidThickness {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+impl FluidThickness {
+    pub fn new(
+        device: &wgpu::Device,
+        uniform_bind_group_layout: wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        // TODO: can pull out commonalities with Fluid Depth pipeline
+        let module = device.create_shader_module(wgpu::include_wgsl!("fluid_depth.wgsl"));
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fluid_thickness"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Fluid thickness calculation"),
+            bind_group_layouts: &[Some(&uniform_bind_group_layout), Some(&layout)],
+            immediate_size: 0,
+        });
+        let fluid_thickness_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("fluid thickness pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vertex_main"),
+                    buffers: &[], // no buffers needed since we use sph buffer
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("frag_thickness"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        //::ADDITIVE is not being found for some reason so explicit definition
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Texture::DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            });
+
+        Self {
+            pipeline: fluid_thickness_pipeline,
+            layout,
+        }
+    }
+
+    pub fn draw(
+        &self,
+        device: &wgpu::Device,
+        fluid_particles: &wgpu::Buffer,
+        nparticles: u32,
+        render_pass: &mut wgpu::RenderPass,
+        uniforms: &wgpu::BindGroup,
+    ) {
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, uniforms, &[]);
+        let particles_binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: fluid_particles.as_entire_binding(),
+            }],
+        });
+        render_pass.set_bind_group(1, &particles_binding, &[]);
+        // TODO: should be instanced with rectangles?
+        render_pass.draw(0..4, 0..nparticles);
+    }
+}
 /// Perform screen-space fluid rendering
 /// see https://wstahw.win.tue.nl/edu/2IV06/andrei/particle_rendering/provided/p91-van_der_laan.pdf
 pub struct ScreenSpaceRendering {
     compaction: FluidCompaction,
     depth: FluidDepth,
+    thickness: FluidThickness,
     n_fluid: u32,
 }
 
@@ -318,7 +436,8 @@ impl ScreenSpaceRendering {
     ) -> Self {
         Self {
             compaction: FluidCompaction::new(device, nparticles),
-            depth: FluidDepth::new(device, uniform_bind_group_layout, surface_format),
+            depth: FluidDepth::new(device, &uniform_bind_group_layout, surface_format),
+            thickness: FluidThickness::new(device, uniform_bind_group_layout, surface_format),
             n_fluid,
         }
     }
@@ -340,7 +459,15 @@ impl ScreenSpaceRendering {
         render_pass: &mut wgpu::RenderPass,
         uniforms: &wgpu::BindGroup,
     ) {
-        self.depth.draw(
+        // self.depth.draw(
+        //     device,
+        //     self.compaction.get_compact_fluids_buffer(),
+        //     self.n_fluid,
+        //     render_pass,
+        //     uniforms,
+        // );
+
+        self.thickness.draw(
             device,
             self.compaction.get_compact_fluids_buffer(),
             self.n_fluid,
