@@ -417,6 +417,11 @@ impl FluidThickness {
         render_pass.draw(0..4, 0..nparticles);
     }
 }
+
+struct CurvatureFlow {
+    pipeline: wgpu::ComputePipeline,
+}
+
 /// Perform screen-space fluid rendering
 /// see https://wstahw.win.tue.nl/edu/2IV06/andrei/particle_rendering/provided/p91-van_der_laan.pdf
 pub struct ScreenSpaceRendering {
@@ -459,13 +464,13 @@ impl ScreenSpaceRendering {
         render_pass: &mut wgpu::RenderPass,
         uniforms: &wgpu::BindGroup,
     ) {
-        // self.depth.draw(
-        //     device,
-        //     self.compaction.get_compact_fluids_buffer(),
-        //     self.n_fluid,
-        //     render_pass,
-        //     uniforms,
-        // );
+        self.depth.draw(
+            device,
+            self.compaction.get_compact_fluids_buffer(),
+            self.n_fluid,
+            render_pass,
+            uniforms,
+        );
 
         self.thickness.draw(
             device,
