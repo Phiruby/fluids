@@ -454,11 +454,13 @@ struct CurvatureFlowUniform {
 }
 
 struct CurvatureFlow {
-    pipeline: wgpu::ComputePipeline,
+    curvature_flow_pipeline: wgpu::ComputePipeline,
+    normals_pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     niterations: u32,
     alternate_depth1: Texture,
     alternate_depth2: Texture,
+    normals: Texture,
     extent: wgpu::Extent3d,
     uniform_buffer: wgpu::Buffer,
     uniform: CurvatureFlowUniform,
@@ -509,6 +511,16 @@ impl CurvatureFlow {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -532,16 +544,26 @@ impl CurvatureFlow {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let curvature_flow_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("curvature flow"),
+                module: &module,
+                entry_point: Some("curvature_flow"),
+                layout: Some(&pipeline_layout),
+                compilation_options: Default::default(),
+                cache: Default::default(),
+            });
+        let normals_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("curvature flow"),
             module: &module,
-            entry_point: Some("main"),
+            entry_point: Some("compute_normals"),
             layout: Some(&pipeline_layout),
             compilation_options: Default::default(),
             cache: Default::default(),
         });
+
         let ping_pong_depth_desc = wgpu::TextureDescriptor {
-            label: Some("Curvature Ping-Pong Texture"),
+            label: Some("curvature ping-pong depth"),
             size: wgpu::Extent3d {
                 width: extent_width,
                 height: extent_height,
@@ -556,8 +578,25 @@ impl CurvatureFlow {
                 | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         };
+
+        let normal_map_desc = wgpu::TextureDescriptor {
+            label: Some("curvature normal map"),
+            size: wgpu::Extent3d {
+                width: extent_width,
+                height: extent_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        };
+
         let alternate_depth1 = Texture::from_descriptor(device, &ping_pong_depth_desc);
         let alternate_depth2 = Texture::from_descriptor(device, &ping_pong_depth_desc);
+        let normals = Texture::from_descriptor(device, &normal_map_desc);
 
         let bytes_per_pixel = 4; // 32-bit float = 4 bytes
         let unpadded_bytes_per_row = extent_width * bytes_per_pixel;
@@ -571,11 +610,13 @@ impl CurvatureFlow {
             mapped_at_creation: false,
         });
         Self {
-            pipeline,
+            curvature_flow_pipeline,
+            normals_pipeline,
             layout,
             niterations: 1,
             alternate_depth1,
             alternate_depth2,
+            normals,
             extent: wgpu::Extent3d {
                 width: extent_width,
                 height: extent_height,
@@ -647,6 +688,10 @@ impl CurvatureFlow {
                     binding: 2,
                     resource: self.uniform_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.normals.view),
+                },
             ],
         });
         let bind_group2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -665,11 +710,15 @@ impl CurvatureFlow {
                     binding: 2,
                     resource: self.uniform_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.normals.view),
+                },
             ],
         });
         let (h, w) = (fluid_depth.texture.height(), fluid_depth.texture.width());
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(&self.curvature_flow_pipeline);
         for i in 0..self.niterations {
             let bg = if i % 2 == 0 {
                 &bind_group1
@@ -679,6 +728,9 @@ impl CurvatureFlow {
             pass.set_bind_group(0, bg, &[]);
             pass.dispatch_workgroups(w / 16, h / 16, 1);
         }
+        pass.set_pipeline(&self.normals_pipeline);
+        pass.set_bind_group(0, &bind_group2, &[]);
+        pass.dispatch_workgroups(w / 16, h / 16, 1);
     }
 
     fn smoothed_depth_view(&self) -> &wgpu::TextureView {
