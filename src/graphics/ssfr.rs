@@ -573,7 +573,7 @@ impl CurvatureFlow {
         Self {
             pipeline,
             layout,
-            niterations: 2,
+            niterations: 1,
             alternate_depth1,
             alternate_depth2,
             extent: wgpu::Extent3d {
@@ -599,7 +599,7 @@ impl CurvatureFlow {
                 texture: &fluid_depth.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::DepthOnly, // Crucial for depth targets
+                aspect: wgpu::TextureAspect::DepthOnly,
             },
             wgpu::TexelCopyBufferInfo {
                 buffer: &self.depth_staging,
@@ -612,7 +612,6 @@ impl CurvatureFlow {
             self.extent,
         );
 
-        // Step B: Staging Buffer -> R32Float Ping-Pong Texture A
         encoder.copy_buffer_to_texture(
             wgpu::TexelCopyBufferInfo {
                 buffer: &self.depth_staging,
@@ -630,21 +629,6 @@ impl CurvatureFlow {
             },
             self.extent,
         );
-        // encoder.copy_texture_to_texture(
-        //     wgpu::TexelCopyTextureInfo {
-        //         texture: &fluid_depth.texture,
-        //         mip_level: 0,
-        //         origin: wgpu::Origin3d::ZERO,
-        //         aspect: wgpu::TextureAspect::DepthOnly,
-        //     },
-        //     wgpu::TexelCopyTextureInfo {
-        //         texture: &self.alternate_depth1.texture,
-        //         mip_level: 0,
-        //         origin: wgpu::Origin3d::ZERO,
-        //         aspect: wgpu::TextureAspect::DepthOnly,
-        //     },
-        //     self.extent,
-        // );
         let input = &self.alternate_depth1.view;
         let output = &self.alternate_depth2.view;
         let bind_group1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -696,6 +680,95 @@ impl CurvatureFlow {
             pass.dispatch_workgroups(w / 16, h / 16, 1);
         }
     }
+
+    fn smoothed_depth_view(&self) -> &wgpu::TextureView {
+        if self.niterations % 2 == 0 {
+            &self.alternate_depth1.view
+        } else {
+            &self.alternate_depth2.view
+        }
+    }
+}
+
+/// temporary pipeline to visualize depth after curvature flow
+struct DepthViz {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+impl DepthViz {
+    fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        let module = device.create_shader_module(wgpu::include_wgsl!("visualize_depth.wgsl"));
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("depth viz"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("depth viz"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("depth viz"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { pipeline, layout }
+    }
+
+    fn draw(
+        &self,
+        device: &wgpu::Device,
+        depth_view: &wgpu::TextureView,
+        render_pass: &mut wgpu::RenderPass,
+    ) {
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("depth viz"),
+            layout: &self.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(depth_view),
+            }],
+        });
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &bg, &[]);
+        render_pass.draw(0..3, 0..1);
+    }
 }
 
 /// Perform screen-space fluid rendering
@@ -705,6 +778,7 @@ pub struct ScreenSpaceRendering {
     depth: FluidDepth,
     thickness: FluidThickness,
     smoothing: CurvatureFlow,
+    depth_viz: DepthViz,
     n_fluid: u32,
 }
 
@@ -717,6 +791,8 @@ impl ScreenSpaceRendering {
         surface_format: wgpu::TextureFormat,
         extent_width: u32,
         extent_height: u32,
+        focal_x: f32,
+        focal_y: f32,
     ) -> Self {
         Self {
             compaction: FluidCompaction::new(device, nparticles),
@@ -728,7 +804,8 @@ impl ScreenSpaceRendering {
                 extent_height,
             ),
             thickness: FluidThickness::new(device, uniform_bind_group_layout, surface_format),
-            smoothing: CurvatureFlow::new(device, extent_width, extent_height, 0.0, 0.0),
+            smoothing: CurvatureFlow::new(device, extent_width, extent_height, focal_x, focal_y),
+            depth_viz: DepthViz::new(device, surface_format),
             n_fluid,
         }
     }
@@ -760,14 +837,6 @@ impl ScreenSpaceRendering {
         render_pass: &mut wgpu::RenderPass,
         uniforms: &wgpu::BindGroup,
     ) {
-        // self.depth.draw(
-        //     device,
-        //     self.compaction.get_compact_fluids_buffer(),
-        //     self.n_fluid,
-        //     render_pass,
-        //     uniforms,
-        // );
-        //
         self.thickness.draw(
             device,
             self.compaction.get_compact_fluids_buffer(),
@@ -775,6 +844,8 @@ impl ScreenSpaceRendering {
             render_pass,
             uniforms,
         );
+        self.depth_viz
+            .draw(device, self.smoothing.smoothed_depth_view(), render_pass);
     }
 }
 

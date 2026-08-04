@@ -74,6 +74,11 @@ impl Camera {
             cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
         return (OPENGL_TO_WGPU_MATRIX * projection, view);
     }
+    fn focal_lengths(&self) -> (f32, f32) {
+        let focal_y = 1.0 / (self.fovy.to_radians() * 0.5).tan();
+        let focal_x = focal_y / self.aspect;
+        (focal_x, focal_y)
+    }
 }
 pub struct State {
     surface: wgpu::Surface<'static>,
@@ -112,7 +117,7 @@ impl CameraUniform {
         Self {
             view: cgmath::Matrix4::identity().into(),
             projection: cgmath::Matrix4::identity().into(),
-            particle_radius: 0.1,
+            particle_radius: 0.5,
             screen_height: 100.0,
             _pad: [0.0; 2],
         }
@@ -273,6 +278,7 @@ impl State {
         let mc_pipeline =
             MarchingCubesRenderPipeline::new(&device, &camera_bind_group_layout, config.format);
         // TODO: needs to be updated on screen resize
+        let (focal_x, focal_y) = camera.focal_lengths();
         let screen_space_rendering = ScreenSpaceRendering::new(
             &device,
             camera_bind_group_layout,
@@ -281,6 +287,8 @@ impl State {
             config.format,
             size.width,
             size.height,
+            focal_x,
+            focal_y,
         );
         Ok(Self {
             surface,

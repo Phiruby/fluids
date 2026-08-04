@@ -84,7 +84,8 @@ fn main(
 
     let div = divergence_normal(local_id.x + 1, local_id.y + 1);
     let h = div / 2.0;
-    let dz = h * ubo.dt;
+    var dz: f32;
+    dz = h * ubo.dt;
 
     let pixel_x = tile_origin.x + i32(local_id.x);
     let pixel_y = tile_origin.y + i32(local_id.y);
@@ -99,3 +100,5 @@ fn main(
         )
     );
 }
+
+
