@@ -1,7 +1,6 @@
-use wgpu::RenderPassDepthStencilAttachment;
-
 use crate::physics::{FluidParticle, PrefixSum};
 use crate::texture::Texture;
+use wgpu::util::DeviceExt;
 /// After SPH sim, the particles buffer contains a mix of
 /// boundary and fluid particles. this performs compaction
 /// to get a buffer with just fluid particles
@@ -200,7 +199,7 @@ impl FluidCompaction {
 struct FluidDepth {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
-    depth_texture: Texture,
+    pub depth_texture: Texture,
 }
 
 impl FluidDepth {
@@ -439,13 +438,264 @@ impl FluidThickness {
             }],
         });
         render_pass.set_bind_group(1, &particles_binding, &[]);
-        // TODO: should be instanced with rectangles?
         render_pass.draw(0..4, 0..nparticles);
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CurvatureFlowUniform {
+    viewport_width: f32,
+    viewport_height: f32,
+    focal_x: f32,
+    focal_y: f32,
+    dt: f32,
+    depth_threshold: f32,
+}
+
 struct CurvatureFlow {
     pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    niterations: u32,
+    alternate_depth1: Texture,
+    alternate_depth2: Texture,
+    extent: wgpu::Extent3d,
+    uniform_buffer: wgpu::Buffer,
+    uniform: CurvatureFlowUniform,
+    depth_staging: wgpu::Buffer,
+    padded_bytes_per_row: u32,
+}
+
+impl CurvatureFlow {
+    pub fn new(
+        device: &wgpu::Device,
+        extent_width: u32,
+        extent_height: u32,
+        focal_x: f32,
+        focal_y: f32,
+    ) -> Self {
+        let module = device.create_shader_module(wgpu::include_wgsl!("curvature_flow.wgsl"));
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("curvature flow"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    // TODO: verify that texture format is fine
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::R32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let uniform = CurvatureFlowUniform {
+            viewport_width: extent_width as f32,
+            viewport_height: extent_height as f32,
+            focal_x,
+            focal_y,
+            dt: 0.001,
+            depth_threshold: 0.1,
+        };
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("curvature flow uniform buffer"),
+            contents: bytemuck::cast_slice(&[uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("curvature flow"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("curvature flow"),
+            module: &module,
+            entry_point: Some("main"),
+            layout: Some(&pipeline_layout),
+            compilation_options: Default::default(),
+            cache: Default::default(),
+        });
+        let ping_pong_depth_desc = wgpu::TextureDescriptor {
+            label: Some("Curvature Ping-Pong Texture"),
+            size: wgpu::Extent3d {
+                width: extent_width,
+                height: extent_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        };
+        let alternate_depth1 = Texture::from_descriptor(device, &ping_pong_depth_desc);
+        let alternate_depth2 = Texture::from_descriptor(device, &ping_pong_depth_desc);
+
+        let bytes_per_pixel = 4; // 32-bit float = 4 bytes
+        let unpadded_bytes_per_row = extent_width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT; // 256
+        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) & !(align - 1);
+
+        let depth_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Depth Copy Staging Buffer"),
+            size: (padded_bytes_per_row * extent_height) as u64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            layout,
+            niterations: 2,
+            alternate_depth1,
+            alternate_depth2,
+            extent: wgpu::Extent3d {
+                width: extent_width,
+                height: extent_height,
+                depth_or_array_layers: 1,
+            },
+            uniform_buffer,
+            uniform,
+            depth_staging,
+            padded_bytes_per_row,
+        }
+    }
+
+    pub fn smooth(
+        &self,
+        device: &wgpu::Device,
+        fluid_depth: &Texture,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &fluid_depth.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly, // Crucial for depth targets
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.depth_staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.padded_bytes_per_row),
+                    rows_per_image: Some(self.extent.height),
+                },
+            },
+            self.extent,
+        );
+
+        // Step B: Staging Buffer -> R32Float Ping-Pong Texture A
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.depth_staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.padded_bytes_per_row),
+                    rows_per_image: Some(self.extent.height),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.alternate_depth1.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            self.extent,
+        );
+        // encoder.copy_texture_to_texture(
+        //     wgpu::TexelCopyTextureInfo {
+        //         texture: &fluid_depth.texture,
+        //         mip_level: 0,
+        //         origin: wgpu::Origin3d::ZERO,
+        //         aspect: wgpu::TextureAspect::DepthOnly,
+        //     },
+        //     wgpu::TexelCopyTextureInfo {
+        //         texture: &self.alternate_depth1.texture,
+        //         mip_level: 0,
+        //         origin: wgpu::Origin3d::ZERO,
+        //         aspect: wgpu::TextureAspect::DepthOnly,
+        //     },
+        //     self.extent,
+        // );
+        let input = &self.alternate_depth1.view;
+        let output = &self.alternate_depth2.view;
+        let bind_group1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(input),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(output),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let bind_group2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(output),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(input),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let (h, w) = (fluid_depth.texture.height(), fluid_depth.texture.width());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&self.pipeline);
+        for i in 0..self.niterations {
+            let bg = if i % 2 == 0 {
+                &bind_group1
+            } else {
+                &bind_group2
+            };
+            pass.set_bind_group(0, bg, &[]);
+            pass.dispatch_workgroups(w / 16, h / 16, 1);
+        }
+    }
 }
 
 /// Perform screen-space fluid rendering
@@ -454,6 +704,7 @@ pub struct ScreenSpaceRendering {
     compaction: FluidCompaction,
     depth: FluidDepth,
     thickness: FluidThickness,
+    smoothing: CurvatureFlow,
     n_fluid: u32,
 }
 
@@ -477,6 +728,7 @@ impl ScreenSpaceRendering {
                 extent_height,
             ),
             thickness: FluidThickness::new(device, uniform_bind_group_layout, surface_format),
+            smoothing: CurvatureFlow::new(device, extent_width, extent_height, 0.0, 0.0),
             n_fluid,
         }
     }
@@ -498,6 +750,8 @@ impl ScreenSpaceRendering {
             self.n_fluid,
             uniforms,
         );
+        let depth_texture = &self.depth.depth_texture;
+        self.smoothing.smooth(device, depth_texture, encoder);
     }
 
     pub fn draw(
