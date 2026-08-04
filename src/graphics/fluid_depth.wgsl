@@ -33,6 +33,10 @@ struct VertexOutput {
 };
 
 struct FragmentOutput {
+    @builtin(frag_depth) frag_depth: f32,
+}
+
+struct FragmentOutputColor {
     @location(0) color: vec4<f32>,
     @builtin(frag_depth) frag_depth: f32,
 }
@@ -66,18 +70,15 @@ fn frag_main(input: VertexOutput) -> FragmentOutput {
     if r > 1.0 { discard; }
     let local_z = sqrt(1.0 - r) * ubo.particle_radius;
     let cummulative_depth = input.view_space.z + local_z;
-    // out.view_depth = cummulative_depth;
     let depth_color = clamp((abs(cummulative_depth) - 0.1) / (5.0 - 0.1), 0.0, 1.0);
-    out.color = vec4<f32>(depth_color, depth_color, depth_color, 1.0);
-
     let proj_pos = ubo.projection * vec4<f32>(0.0, 0.0, cummulative_depth, 1.0);
     out.frag_depth = proj_pos.z / proj_pos.w;
     return out;
 }
 
 @fragment
-fn frag_thickness(input: VertexOutput) -> FragmentOutput {
-    var out: FragmentOutput;
+fn frag_thickness(input: VertexOutput) -> FragmentOutputColor {
+    var out: FragmentOutputColor;
     let r = dot(input.uv, input.uv);
     if r > 1.0 { discard; }
     let scale = 2.0;

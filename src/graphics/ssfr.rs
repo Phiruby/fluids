@@ -1,3 +1,5 @@
+use wgpu::RenderPassDepthStencilAttachment;
+
 use crate::physics::{FluidParticle, PrefixSum};
 use crate::texture::Texture;
 /// After SPH sim, the particles buffer contains a mix of
@@ -198,6 +200,7 @@ impl FluidCompaction {
 struct FluidDepth {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    depth_texture: Texture,
 }
 
 impl FluidDepth {
@@ -205,6 +208,8 @@ impl FluidDepth {
         device: &wgpu::Device,
         uniform_bind_group_layout: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
+        extend_width: u32,
+        extend_height: u32,
     ) -> Self {
         // TODO: we can use create_pipeline from crate::graphics
         let module = device.create_shader_module(wgpu::include_wgsl!("fluid_depth.wgsl"));
@@ -238,11 +243,7 @@ impl FluidDepth {
             fragment: Some(wgpu::FragmentState {
                 module: &module,
                 entry_point: Some("frag_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -270,20 +271,45 @@ impl FluidDepth {
             cache: None,
         });
 
+        let depth_texture =
+            Texture::create_depth_texture(device, extend_width, extend_height, "fluid depth ssfr");
         Self {
             pipeline: fluid_depth_pipeline,
             layout,
+            depth_texture,
+        }
+    }
+
+    fn get_render_pass_descriptor(&self) -> wgpu::RenderPassDescriptor<'_> {
+        wgpu::RenderPassDescriptor {
+            label: Some("Fluid depth calculation render pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    // TODO: verify 1.0 is enough
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         }
     }
 
     pub fn draw(
         &self,
         device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
         fluid_particles: &wgpu::Buffer,
         nparticles: u32,
-        render_pass: &mut wgpu::RenderPass,
         uniforms: &wgpu::BindGroup,
     ) {
+        let render_pass_desc = self.get_render_pass_descriptor();
+        let mut render_pass = encoder.begin_render_pass(&render_pass_desc);
+
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, uniforms, &[]);
         let particles_binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -438,10 +464,18 @@ impl ScreenSpaceRendering {
         nparticles: u32,
         n_fluid: u32,
         surface_format: wgpu::TextureFormat,
+        extent_width: u32,
+        extent_height: u32,
     ) -> Self {
         Self {
             compaction: FluidCompaction::new(device, nparticles),
-            depth: FluidDepth::new(device, &uniform_bind_group_layout, surface_format),
+            depth: FluidDepth::new(
+                device,
+                &uniform_bind_group_layout,
+                surface_format,
+                extent_width,
+                extent_height,
+            ),
             thickness: FluidThickness::new(device, uniform_bind_group_layout, surface_format),
             n_fluid,
         }
@@ -454,8 +488,16 @@ impl ScreenSpaceRendering {
         device: &wgpu::Device,
         particles: &wgpu::Buffer,
         encoder: &mut wgpu::CommandEncoder,
+        uniforms: &wgpu::BindGroup,
     ) {
         self.compaction.compact(device, particles, encoder);
+        self.depth.draw(
+            device,
+            encoder,
+            self.compaction.get_compact_fluids_buffer(),
+            self.n_fluid,
+            uniforms,
+        );
     }
 
     pub fn draw(
@@ -464,14 +506,14 @@ impl ScreenSpaceRendering {
         render_pass: &mut wgpu::RenderPass,
         uniforms: &wgpu::BindGroup,
     ) {
-        self.depth.draw(
-            device,
-            self.compaction.get_compact_fluids_buffer(),
-            self.n_fluid,
-            render_pass,
-            uniforms,
-        );
-
+        // self.depth.draw(
+        //     device,
+        //     self.compaction.get_compact_fluids_buffer(),
+        //     self.n_fluid,
+        //     render_pass,
+        //     uniforms,
+        // );
+        //
         self.thickness.draw(
             device,
             self.compaction.get_compact_fluids_buffer(),

@@ -228,7 +228,8 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
-        let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
+        let depth_texture =
+            Texture::create_depth_texture(&device, config.width, config.height, "Depth texture");
         let container_pipeline = WireframeBoxPipeline::new(
             &device,
             &camera_bind_group_layout,
@@ -271,12 +272,15 @@ impl State {
         let marching_cubes = MarchingCubes::new(&device);
         let mc_pipeline =
             MarchingCubesRenderPipeline::new(&device, &camera_bind_group_layout, config.format);
+        // TODO: needs to be updated on screen resize
         let screen_space_rendering = ScreenSpaceRendering::new(
             &device,
             camera_bind_group_layout,
             fluid_particles.len() as u32,
             n_fluid,
             config.format,
+            size.width,
+            size.height,
         );
         Ok(Self {
             surface,
@@ -307,8 +311,10 @@ impl State {
             self.camera.aspect = width as f32 / height as f32;
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
+            let height = self.config.height;
+            let width = self.config.width;
             self.depth_texture =
-                Texture::create_depth_texture(&self.device, &self.config, "Depth texture");
+                Texture::create_depth_texture(&self.device, width, height, "Depth texture");
             self.camera_uniform.screen_height = height as f32;
         }
     }
@@ -364,6 +370,7 @@ impl State {
                 &self.device,
                 self.fluid_sim.particle_buffer(),
                 &mut encoder,
+                &self.camera_bind_group,
             );
         }
 
