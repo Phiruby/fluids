@@ -103,7 +103,8 @@ fn curvature_flow(
     );
 }
 
-fn get_normal(x: u32, y: u32) -> vec4<f32> {
+// Eq (4) in file:///home/kyber/Downloads/Screen_space_fluid_rendering_with_curvature_flow.pdf
+fn get_normal(x: u32, y: u32) -> vec3<f32> {
     let z_center = depth_cache[x][y];
     let z_l = depth_cache[x - 1u][y];
     let z_r = depth_cache[x + 1u][y];
@@ -119,7 +120,7 @@ fn get_normal(x: u32, y: u32) -> vec4<f32> {
     let thresh = ubo.depth_threshold;
     if abs(z_r - z_center) > thresh || abs(z_l - z_center) > thresh ||
         abs(z_t - z_center) > thresh || abs(z_b - z_center) > thresh {
-        return vec4<f32>(0.0);
+        return vec3<f32>(1.0);
     }
     let pzpx = (z_r - z_l) * 0.5;
     let pzpy = (z_t - z_b) * 0.5;
@@ -130,12 +131,10 @@ fn get_normal(x: u32, y: u32) -> vec4<f32> {
     let cx2 = cx * cx;
     let cy2 = cy * cy;
     let d = cy2 * pzpx * pzpx + cx2 * pzpy * pzpy + cx2 * cy2 * z_center * z_center;
-
-    return vec4<f32>(
+    return vec3<f32>(
         -cy * pzpx,
         -cx * pzpy,
         cx * cy * depth_cache[x][y],
-        1.0
     ) / sqrt(d);
 }
 
@@ -144,7 +143,6 @@ fn compute_normals(
     @builtin(global_invocation_id) global_id: vec3<u32>, @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    // each workgroup gets 16x16 pixel group;
     let local_index = local_id.y * 16u + local_id.x;
     let tile_origin = vec2<i32>(workgroup_id.xy * 16u) - vec2<i32>(1, 1);
 
@@ -153,7 +151,6 @@ fn compute_normals(
     let sample_pos = tile_origin + vec2<i32>(i32(cache_x), i32(cache_y));
     depth_cache[cache_x][cache_y] = textureLoad(input_depth, sample_pos, 0).r;
 
-    // only the first ~68 threads will load padded depth cache (i.e boundary values)
     if local_index + 256u < 324u {
         let idx = local_index + 256u;
         let cache_x = idx % 18u;
@@ -166,9 +163,9 @@ fn compute_normals(
     let pixel_x = tile_origin.x + i32(local_id.x);
     let pixel_y = tile_origin.y + i32(local_id.y);
     textureStore(
-        output_depth,
+        normals,
         vec2<i32>(i32(pixel_x), i32(pixel_y)),
-        normal,
+        vec4<f32>(normal, 1.0),
     );
 }
 

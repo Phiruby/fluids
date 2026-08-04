@@ -1,5 +1,5 @@
-@group(0) @binding(0) var depth_tex: texture_2d<f32>;
-
+@group(0) @binding(0) var normals_texture: texture_2d<f32>;
+@group(0) @binding(1) var thickness_texture: texture_2d<f32>;
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     var pos = array<vec2<f32>, 3>(
@@ -12,10 +12,8 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let d = textureLoad(depth_tex, vec2<i32>(frag_pos.xy), 0).r;
-    if d >= 0.999 {
-        return vec4(0.05, 0.05, 0.08, 1.0);
-    }
-    let t = 1.0 - clamp(d, 0.0, 1.0);
-    return vec4(t, t, t, 1.0);
+    // let d = textureLoad(normals_texture, vec2<i32>(frag_pos.xy), 0);
+    // return d;
+    let d = textureLoad(thickness_texture, vec2<i32>(frag_pos.xy), 0).r;
+    return vec4(d, 0.0, d, 1.0);
 }

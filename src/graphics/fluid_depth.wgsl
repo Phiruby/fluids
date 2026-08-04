@@ -77,13 +77,10 @@ fn frag_main(input: VertexOutput) -> FragmentOutput {
 }
 
 @fragment
-fn frag_thickness(input: VertexOutput) -> FragmentOutputColor {
-    var out: FragmentOutputColor;
+fn frag_thickness(input: VertexOutput) -> @location(0) vec4<f32> {
     let r = dot(input.uv, input.uv);
     if r > 1.0 { discard; }
     let scale = 2.0;
     let thickness = scale * 2.0 * sqrt(1.0 - r) * ubo.particle_radius;
-    out.color = vec4<f32>(thickness, 0.0, thickness, 1.0);
-    out.frag_depth = 0.0;
-    return out;
+    return vec4<f32>(thickness, 0.0, 0.0, 1.0);
 }

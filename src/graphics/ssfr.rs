@@ -328,13 +328,15 @@ impl FluidDepth {
 struct FluidThickness {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    thickness_texture: Texture,
 }
 
 impl FluidThickness {
     pub fn new(
         device: &wgpu::Device,
         uniform_bind_group_layout: wgpu::BindGroupLayout,
-        surface_format: wgpu::TextureFormat,
+        extent_width: u32,
+        extent_height: u32,
     ) -> Self {
         // TODO: can pull out commonalities with Fluid Depth pipeline
         let module = device.create_shader_module(wgpu::include_wgsl!("fluid_depth.wgsl"));
@@ -370,7 +372,7 @@ impl FluidThickness {
                     module: &module,
                     entry_point: Some("frag_thickness"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: surface_format,
+                        format: wgpu::TextureFormat::R16Float,
                         //::ADDITIVE is not being found for some reason so explicit definition
                         blend: Some(wgpu::BlendState {
                             color: wgpu::BlendComponent {
@@ -378,13 +380,9 @@ impl FluidThickness {
                                 dst_factor: wgpu::BlendFactor::One,
                                 operation: wgpu::BlendOperation::Add,
                             },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
+                            alpha: wgpu::BlendComponent::REPLACE,
                         }),
-                        write_mask: wgpu::ColorWrites::ALL,
+                        write_mask: wgpu::ColorWrites::RED,
                     })],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
@@ -397,13 +395,7 @@ impl FluidThickness {
                     unclipped_depth: false,
                     conservative: false,
                 },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: Texture::DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
+                depth_stencil: None,
                 multisample: wgpu::MultisampleState {
                     count: 1,
                     mask: !0,
@@ -412,21 +404,63 @@ impl FluidThickness {
                 multiview_mask: None,
                 cache: None,
             });
-
+        let thickness_texture = Texture::from_descriptor(
+            device,
+            &wgpu::TextureDescriptor {
+                label: Some("thickness"),
+                size: wgpu::Extent3d {
+                    width: extent_width,
+                    height: extent_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
         Self {
             pipeline: fluid_thickness_pipeline,
             layout,
+            thickness_texture,
         }
     }
 
+    pub fn thickness_texture(&self) -> &Texture {
+        &self.thickness_texture
+    }
     pub fn draw(
         &self,
         device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
         fluid_particles: &wgpu::Buffer,
         nparticles: u32,
-        render_pass: &mut wgpu::RenderPass,
         uniforms: &wgpu::BindGroup,
     ) {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.thickness_texture.view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, uniforms, &[]);
         let particles_binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -733,12 +767,8 @@ impl CurvatureFlow {
         pass.dispatch_workgroups(w / 16, h / 16, 1);
     }
 
-    fn smoothed_depth_view(&self) -> &wgpu::TextureView {
-        if self.niterations % 2 == 0 {
-            &self.alternate_depth1.view
-        } else {
-            &self.alternate_depth2.view
-        }
+    fn normal_map(&self) -> &wgpu::TextureView {
+        &self.normals.view
     }
 }
 
@@ -753,16 +783,28 @@ impl DepthViz {
         let module = device.create_shader_module(wgpu::include_wgsl!("visualize_depth.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("depth viz"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("depth viz"),
@@ -807,15 +849,22 @@ impl DepthViz {
         &self,
         device: &wgpu::Device,
         depth_view: &wgpu::TextureView,
+        thickness_view: &wgpu::TextureView,
         render_pass: &mut wgpu::RenderPass,
     ) {
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("depth viz"),
             layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(depth_view),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(thickness_view),
+                },
+            ],
         });
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &bg, &[]);
@@ -855,7 +904,12 @@ impl ScreenSpaceRendering {
                 extent_width,
                 extent_height,
             ),
-            thickness: FluidThickness::new(device, uniform_bind_group_layout, surface_format),
+            thickness: FluidThickness::new(
+                device,
+                uniform_bind_group_layout,
+                extent_width,
+                extent_height,
+            ),
             smoothing: CurvatureFlow::new(device, extent_width, extent_height, focal_x, focal_y),
             depth_viz: DepthViz::new(device, surface_format),
             n_fluid,
@@ -872,6 +926,13 @@ impl ScreenSpaceRendering {
         uniforms: &wgpu::BindGroup,
     ) {
         self.compaction.compact(device, particles, encoder);
+        self.thickness.draw(
+            device,
+            encoder,
+            self.compaction.get_compact_fluids_buffer(),
+            self.n_fluid,
+            uniforms,
+        );
         self.depth.draw(
             device,
             encoder,
@@ -889,15 +950,12 @@ impl ScreenSpaceRendering {
         render_pass: &mut wgpu::RenderPass,
         uniforms: &wgpu::BindGroup,
     ) {
-        self.thickness.draw(
+        self.depth_viz.draw(
             device,
-            self.compaction.get_compact_fluids_buffer(),
-            self.n_fluid,
+            self.smoothing.normal_map(),
+            &self.thickness.thickness_texture().view,
             render_pass,
-            uniforms,
         );
-        self.depth_viz
-            .draw(device, self.smoothing.smoothed_depth_view(), render_pass);
     }
 }
 
