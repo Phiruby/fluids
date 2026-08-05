@@ -40,7 +40,7 @@ const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRend
 
 const FLUID_GRID_N: usize = 30;
 const FLUID_SPACING: f32 = 0.03;
-const FLUID_PARTICLE_RADIUS: f32 = 0.028;
+const FLUID_PARTICLE_RADIUS: f32 = 0.020;
 const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.12, -0.7];
 const FLUID_CELL_SIZE: f32 = 0.1;
 const FLUID_CONTAINER_LAYERS: usize = 2;

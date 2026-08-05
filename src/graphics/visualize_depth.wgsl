@@ -17,7 +17,6 @@ const N1 = 1.0;
 const N2 = 1.33; // water
 const LIGHT_POS_WORLD = vec3<f32>(0.5, 2.0, 1.5);
 const FLUID_COLOR = vec3<f32>(0.05, 0.35, 0.75);
-const ABSORPTION = vec3<f32>(0.8, 0.25, 0.1);
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -81,19 +80,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let n_dot_h = saturate(dot(n, h));
     let f_val = fresnel_schlick(n_dot_v);
 
-    // kinda like eq (14) in "screen space fluid rendering with curvature flow"; but added ABSORPTION
-    // to get more red for thick parts
-    let transmittance = exp(-thickness * ABSORPTION);
+    // eq (14) in "screen space fluid rendering with curvature flow"
+    let transmittance = exp(-thickness);
     let background = vec3<f32>(0.02, 0.04, 0.08);
     let a = mix(FLUID_COLOR, background, transmittance);
-    let ambient = 0.08 * FLUID_COLOR;
-    let diffuse = 0.35 * FLUID_COLOR * n_dot_l;
     let specular = vec3<f32>(0.85) * pow(n_dot_h, 128.0);
 
     // Eq (13)
     // NOTE: reflected is placeholder env reflection
     let reflected = vec3<f32>(0.15, 0.18, 0.22);
-    let cout = (a + ambient + diffuse) * (1.0 - f_val) + reflected * f_val + specular;
+    let cout = (a) * (1.0 - f_val) + reflected * f_val + specular;
 
     return vec4(cout, 1.0);
 }
