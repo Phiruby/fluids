@@ -1,13 +1,16 @@
 mod boundaries;
 mod fluids;
+mod solids;
 use nalgebra::Vector3;
 use std::ops::Add;
 
 pub use boundaries::ContainerBoundary;
 pub use fluids::FluidSim;
 pub(crate) use fluids::PrefixSum;
+pub use solids::{ElasticSolidSim, elastic_cube};
 
 pub const FLUID_COLOR: [f32; 3] = [0.2, 0.5, 0.95];
+pub const SOLID_COLOR: [f32; 3] = [0.85, 0.45, 0.25];
 
 #[derive(Debug, Clone)]
 #[allow(unused)]
@@ -16,6 +19,145 @@ pub struct PhysicsVertex {
     pub velocity: Vector3<f32>,
     pub renderable: bool,
     pub mass: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[allow(non_snake_case)]
+pub struct ElasticSolidParticle {
+    pub position: [f32; 3],
+    pub mass: f32,
+    pub velocity: [f32; 3],
+    pub rest_volume: f32,
+    pub reference_position: [f32; 3],
+    pub nneighbors: u32,
+    pub color: [f32; 3],
+    pub renderable: u32,
+    pub neighbors: [u32; 27],
+    pub pinned: u32,
+    /// mat3x3, with 16 bytes padding
+    pub L: [f32; 12],
+}
+
+impl Default for ElasticSolidParticle {
+    fn default() -> Self {
+        Self {
+            position: [0.0; 3],
+            mass: 1.0,
+            velocity: [0.0; 3],
+            rest_volume: 0.0,
+            reference_position: [0.0; 3],
+            nneighbors: 0,
+            color: SOLID_COLOR,
+            renderable: 1,
+            neighbors: [0; 27],
+            pinned: 0,
+            L: [0.0; 12],
+        }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<ElasticSolidParticle>() == 224);
+
+impl ElasticSolidParticle {
+    pub fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::offset_of!(Self, color) as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::offset_of!(Self, renderable) as wgpu::BufferAddress,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+            ],
+        }
+    }
+}
+
+pub struct ElasticSolid {
+    pub particles: Vec<ElasticSolidParticle>,
+    pub kernel_h: f32,
+}
+
+impl ElasticSolid {
+    pub fn new(particles: Vec<ElasticSolidParticle>, kernel_h: f32) -> Self {
+        Self {
+            particles,
+            kernel_h,
+        }
+    }
+
+    /// make n x n x n cube
+    pub fn cube(
+        n: usize,
+        spacing: f32,
+        origin: Vector3<f32>,
+        kernel: &CubicKernel,
+        pin_top: bool,
+    ) -> Self {
+        let mut positions = Vec::with_capacity(n * n * n);
+        let mut pinned_flags = Vec::with_capacity(n * n * n);
+        for i in 0..n {
+            for j in 0..n {
+                for k in 0..n {
+                    positions.push(Vector3::new(
+                        origin.x + i as f32 * spacing,
+                        origin.y + j as f32 * spacing,
+                        origin.z + k as f32 * spacing,
+                    ));
+                    pinned_flags.push(pin_top && j == n - 1);
+                }
+            }
+        }
+        let neighbors = precompute_neighbors(&positions, kernel);
+        let vertices: Vec<PhysicsVertex> = positions
+            .iter()
+            .map(|&p| PhysicsVertex {
+                position: p,
+                velocity: Vector3::zeros(),
+                renderable: true,
+                mass: 1.0,
+            })
+            .collect();
+        let densities = compute_densities(&vertices, kernel, &neighbors);
+
+        let mut particles = Vec::with_capacity(positions.len());
+        for (i, &pos) in positions.iter().enumerate() {
+            let mut nbrs = neighbors[i].clone();
+            let nneighbors = nbrs.len().min(27) as u32;
+            // TODO: truncation can be done to choose closest neighbors
+            nbrs.truncate(27);
+            nbrs.resize(27, 0);
+            let density = densities[i].max(1e-8);
+            particles.push(ElasticSolidParticle {
+                position: pos.into(),
+                mass: 1.0,
+                velocity: [0.0; 3],
+                rest_volume: 1.0 / density,
+                reference_position: pos.into(),
+                nneighbors,
+                color: SOLID_COLOR,
+                renderable: 1,
+                neighbors: nbrs.into_iter().map(|j| j as u32).collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+                pinned: pinned_flags[i] as u32,
+                L: [0.0; 12],
+            });
+        }
+        Self::new(particles, kernel.h)
+    }
 }
 
 #[repr(C)]
@@ -51,8 +193,6 @@ impl Default for FluidParticle {
 }
 
 impl FluidParticle {
-    /// Per-instance layout so the render pipeline can read particles straight
-    /// from the simulation buffer (position, `normal` as color, boundary flag).
     pub fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
@@ -77,7 +217,6 @@ impl FluidParticle {
         }
     }
 
-    /// Just to pad the buffers
     pub fn inert() -> Self {
         Self {
             position: [1000.0, 1000.0, 1000.0],
@@ -113,7 +252,6 @@ pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidPart
     particles
 }
 
-
 pub fn lattice_rest_density(spacing: f32, mass: f32, kernel: &CubicKernel) -> f32 {
     let reach = (kernel.h / spacing).ceil() as i32;
     let mut density = 0.0;
@@ -130,7 +268,7 @@ pub fn lattice_rest_density(spacing: f32, mass: f32, kernel: &CubicKernel) -> f3
 
 /// all particles given the same rest density (and initial density as well):
 /// helped stabilize sim since boundary fluid particles naturally are less densed,
-/// which was causing all sorts of problems 
+/// which was causing all sorts of problems
 pub fn assign_rest_densities(
     particles: &mut [FluidParticle],
     boundary_particles: &mut [FluidParticle],

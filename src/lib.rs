@@ -8,7 +8,8 @@ use crate::graphics::{
     WireframeBoxPipeline,
 };
 use crate::physics::{
-    ContainerBoundary, CubicKernel, FluidParticle, FluidSim, assign_rest_densities, fluid_cube,
+    ContainerBoundary, CubicKernel, ElasticSolidSim, FluidParticle, FluidSim, assign_rest_densities,
+    elastic_cube, fluid_cube,
 };
 use crate::texture::Texture;
 use std::sync::Arc;
@@ -49,6 +50,12 @@ const ISO_LEVEL_STEP: f32 = 100.0;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
 const CONTAINER_MAX: [f32; 3] = [0.1, 1.85, 0.8];
+
+const SOLID_GRID_N: usize = 8;
+const SOLID_SPACING: f32 = 0.04;
+const SOLID_ORIGIN: [f32; 3] = [0.25, 0.6, -0.15];
+// temporary; pin top face of elastic cube
+const SOLID_PIN_TOP: bool = true;
 
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
@@ -101,6 +108,7 @@ pub struct State {
     camera_buffer: wgpu::Buffer,
     depth_texture: Texture,
     fluid_sim: FluidSim,
+    solid_sim: ElasticSolidSim,
 }
 
 #[repr(C)]
@@ -274,6 +282,13 @@ impl State {
         fluid_particles.resize(padded_len, FluidParticle::inert());
 
         let fluid_sim = FluidSim::new(&device, &fluid_particles);
+        let solid = elastic_cube(
+            SOLID_GRID_N,
+            SOLID_SPACING,
+            Vector3::from(SOLID_ORIGIN),
+            SOLID_PIN_TOP,
+        );
+        let solid_sim = ElasticSolidSim::new(&device, &queue, &solid);
         let fluid_pipeline = RenderPipeline::new(
             &device,
             &camera_bind_group_layout,
@@ -314,6 +329,7 @@ impl State {
             camera_uniform,
             depth_texture,
             fluid_sim,
+            solid_sim,
             screen_space_rendering,
         })
     }
@@ -368,6 +384,7 @@ impl State {
             });
 
         self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
+        self.solid_sim.step(&self.device, &mut encoder);
 
         if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
             self.marching_cubes.extract(
@@ -445,6 +462,12 @@ impl State {
 
             self.container_pipeline
                 .draw(&mut render_pass, &self.camera_bind_group);
+            self.fluid_pipeline.draw_solid(
+                &mut render_pass,
+                &self.camera_bind_group,
+                self.solid_sim.particle_buffer(),
+                self.solid_sim.num_particles(),
+            );
         }
 
         self.queue.submit([encoder.finish()]);

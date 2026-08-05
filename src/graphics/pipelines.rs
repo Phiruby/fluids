@@ -1,5 +1,5 @@
 use crate::graphics::{PipelineInfo, PipelineState, create_pipeline};
-use crate::physics::FluidParticle;
+use crate::physics::{ElasticSolidParticle, FluidParticle};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -100,9 +100,10 @@ fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
     (vertices, indices)
 }
 
-/// draw fluid particles as instanced cubes (boundary particles are culled in the shader)
+/// instanced cube particles for fluids and elastic solids
 pub struct RenderPipeline {
     fluid: PipelineState,
+    solid: PipelineState,
     mesh_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
@@ -116,7 +117,13 @@ impl RenderPipeline {
         particle_radius: f32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
-        let vertex_buffers = [ParticleMeshVertex::layout(), FluidParticle::instance_layout()];
+        let targets = [Some(wgpu::ColorTargetState {
+            format: surface_format,
+            blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let fluid_bufs = [ParticleMeshVertex::layout(), FluidParticle::instance_layout()];
+        let solid_bufs = [ParticleMeshVertex::layout(), ElasticSolidParticle::instance_layout()];
         let fluid = create_pipeline(
             device,
             &PipelineInfo {
@@ -125,12 +132,22 @@ impl RenderPipeline {
                 fragment_entry_point: "fs_main",
                 primitive_topology: wgpu::PrimitiveTopology::TriangleList,
                 global_bind_group_layout,
-                vertex_buffers: &vertex_buffers,
-                fragment_targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                vertex_buffers: &fluid_bufs,
+                fragment_targets: &targets,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+            },
+        );
+        let solid = create_pipeline(
+            device,
+            &PipelineInfo {
+                shader: &shader,
+                vertex_entry_point: "vs_main",
+                fragment_entry_point: "fs_main",
+                primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+                global_bind_group_layout,
+                vertex_buffers: &solid_bufs,
+                fragment_targets: &targets,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
             },
@@ -148,10 +165,26 @@ impl RenderPipeline {
         });
         Self {
             fluid,
+            solid,
             mesh_buffer,
             index_buffer,
             num_indices: indices.len() as u32,
         }
+    }
+
+    fn draw_with(
+        &self,
+        pipeline: &PipelineState,
+        render_pass: &mut wgpu::RenderPass,
+        global_bind_group: &wgpu::BindGroup,
+        particle_buffer: &wgpu::Buffer,
+        num_instances: u32,
+    ) {
+        pipeline.bind(render_pass, global_bind_group);
+        render_pass.set_vertex_buffer(0, self.mesh_buffer.slice(..));
+        render_pass.set_vertex_buffer(1, particle_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.draw_indexed(0..self.num_indices, 0, 0..num_instances);
     }
 
     pub fn draw(
@@ -161,11 +194,29 @@ impl RenderPipeline {
         particle_buffer: &wgpu::Buffer,
         num_instances: u32,
     ) {
-        self.fluid.bind(render_pass, global_bind_group);
-        render_pass.set_vertex_buffer(0, self.mesh_buffer.slice(..));
-        render_pass.set_vertex_buffer(1, particle_buffer.slice(..));
-        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.draw_indexed(0..self.num_indices, 0, 0..num_instances);
+        self.draw_with(
+            &self.fluid,
+            render_pass,
+            global_bind_group,
+            particle_buffer,
+            num_instances,
+        );
+    }
+
+    pub fn draw_solid(
+        &self,
+        render_pass: &mut wgpu::RenderPass,
+        global_bind_group: &wgpu::BindGroup,
+        particle_buffer: &wgpu::Buffer,
+        num_instances: u32,
+    ) {
+        self.draw_with(
+            &self.solid,
+            render_pass,
+            global_bind_group,
+            particle_buffer,
+            num_instances,
+        );
     }
 }
 

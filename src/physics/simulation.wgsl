@@ -102,7 +102,7 @@ fn surface_tension_force(idx: u32) -> vec3<f32> {
                 let cohesion_force = -ALPHA * m_i * particles[j].mass * cohesion_kernel(idx, j);
                 let curvature_force = -ALPHA * m_i * (particles[idx].normal - particles[j].normal);
                 let Kij = 2 * rho0 / (particles[idx].density + particles[j].density);
-                surface_tension_force += Kij * (cohesion_force + curvature_force);
+                surface_tension_force += is_fluid * Kij * (cohesion_force + curvature_force);
             }
         }
     }
