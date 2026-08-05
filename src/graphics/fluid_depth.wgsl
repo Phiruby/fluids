@@ -35,11 +35,8 @@ struct VertexOutput {
 };
 
 struct FragmentOutput {
-    @builtin(frag_depth) frag_depth: f32,
-}
-
-struct FragmentOutputColor {
-    @location(0) color: vec4<f32>,
+    // eye_depth is depth from view space
+    @location(0) eye_depth: f32,
     @builtin(frag_depth) frag_depth: f32,
 }
 
@@ -70,10 +67,13 @@ fn frag_main(input: VertexOutput) -> FragmentOutput {
     var out: FragmentOutput;
     let r = dot(input.uv, input.uv);
     if r > 1.0 { discard; }
-    let local_z = sqrt(1.0 - r) * ubo.particle_radius;
-    let cummulative_depth = input.view_space.z + local_z;
-    let depth_color = clamp((abs(cummulative_depth) - 0.1) / (5.0 - 0.1), 0.0, 1.0);
-    let proj_pos = ubo.projection * vec4<f32>(0.0, 0.0, cummulative_depth, 1.0);
+    let normal_view = vec3<f32>(input.uv, sqrt(1.0 - r));
+    let view_pos = input.view_space + normal_view * ubo.particle_radius;
+    // NOTE: depth for fluid rendering is in view space (everything in screen space rendering is)
+    let eye_depth = -view_pos.z;
+
+    let proj_pos = ubo.projection * vec4<f32>(view_pos, 1.0);
+    out.eye_depth = eye_depth;
     out.frag_depth = proj_pos.z / proj_pos.w;
     return out;
 }
@@ -82,7 +82,6 @@ fn frag_main(input: VertexOutput) -> FragmentOutput {
 fn frag_thickness(input: VertexOutput) -> @location(0) vec4<f32> {
     let r = dot(input.uv, input.uv);
     if r > 1.0 { discard; }
-    let scale = 2.0;
-    let thickness = scale * 2.0 * sqrt(1.0 - r) * ubo.particle_radius;
+    let thickness = 2.0 * sqrt(1.0 - r) * ubo.particle_radius;
     return vec4<f32>(thickness, 0.0, 0.0, 1.0);
 }

@@ -199,18 +199,19 @@ impl FluidCompaction {
 struct FluidDepth {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
-    pub depth_texture: Texture,
+    /// positive eye-space depth (i.e depth from view space). used by curvature flow
+    pub eye_depth_texture: Texture,
+    /// used for hardware depth testing
+    depth_texture: Texture,
 }
 
 impl FluidDepth {
     pub fn new(
         device: &wgpu::Device,
         uniform_bind_group_layout: &wgpu::BindGroupLayout,
-        surface_format: wgpu::TextureFormat,
         extend_width: u32,
         extend_height: u32,
     ) -> Self {
-        // TODO: we can use create_pipeline from crate::graphics
         let module = device.create_shader_module(wgpu::include_wgsl!("fluid_depth.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fluid_depth"),
@@ -236,13 +237,17 @@ impl FluidDepth {
             vertex: wgpu::VertexState {
                 module: &module,
                 entry_point: Some("vertex_main"),
-                buffers: &[], // no buffers needed since we use sph buffer
+                buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
                 entry_point: Some("frag_main"),
-                targets: &[],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::RED,
+                })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -270,31 +275,32 @@ impl FluidDepth {
             cache: None,
         });
 
+        let eye_depth_texture = Texture::from_descriptor(
+            device,
+            &wgpu::TextureDescriptor {
+                label: Some("fluid eye depth ssfr"),
+                size: wgpu::Extent3d {
+                    width: extend_width,
+                    height: extend_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            },
+        );
         let depth_texture =
             Texture::create_depth_texture(device, extend_width, extend_height, "fluid depth ssfr");
         Self {
             pipeline: fluid_depth_pipeline,
             layout,
+            eye_depth_texture,
             depth_texture,
-        }
-    }
-
-    fn get_render_pass_descriptor(&self) -> wgpu::RenderPassDescriptor<'_> {
-        wgpu::RenderPassDescriptor {
-            label: Some("Fluid depth calculation render pass"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_texture.view,
-                depth_ops: Some(wgpu::Operations {
-                    // TODO: verify 1.0 is enough
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
         }
     }
 
@@ -306,8 +312,35 @@ impl FluidDepth {
         nparticles: u32,
         uniforms: &wgpu::BindGroup,
     ) {
-        let render_pass_desc = self.get_render_pass_descriptor();
-        let mut render_pass = encoder.begin_render_pass(&render_pass_desc);
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Fluid depth calculation render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.eye_depth_texture.view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    // 0 = no fluid (invalid for curvature flow)
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, uniforms, &[]);
@@ -320,7 +353,6 @@ impl FluidDepth {
             }],
         });
         render_pass.set_bind_group(1, &particles_binding, &[]);
-        // TODO: should be instanced with rectangles?
         render_pass.draw(0..4, 0..nparticles);
     }
 }
@@ -497,9 +529,8 @@ struct CurvatureFlow {
     normals: Texture,
     extent: wgpu::Extent3d,
     uniform_buffer: wgpu::Buffer,
-    uniform: CurvatureFlowUniform,
-    depth_staging: wgpu::Buffer,
-    padded_bytes_per_row: u32,
+    /// if final smoothed map is held in alternate_depth1 or alternate_depth2
+    final_in_depth1: bool,
 }
 
 impl CurvatureFlow {
@@ -527,7 +558,6 @@ impl CurvatureFlow {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    // TODO: verify that texture format is fine
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
                         format: wgpu::TextureFormat::R32Float,
@@ -563,8 +593,9 @@ impl CurvatureFlow {
             viewport_height: extent_height as f32,
             focal_x,
             focal_y,
-            dt: 0.001,
-            depth_threshold: 0.1,
+            dt: 0.0008,
+            // ~a few particle radii; blocks silhouette bleed without freezing creases
+            depth_threshold: 0.05,
         };
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("curvature flow uniform buffer"),
@@ -588,7 +619,7 @@ impl CurvatureFlow {
                 cache: Default::default(),
             });
         let normals_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("curvature flow"),
+            label: Some("compute normals"),
             module: &module,
             entry_point: Some("compute_normals"),
             layout: Some(&pipeline_layout),
@@ -632,22 +663,11 @@ impl CurvatureFlow {
         let alternate_depth2 = Texture::from_descriptor(device, &ping_pong_depth_desc);
         let normals = Texture::from_descriptor(device, &normal_map_desc);
 
-        let bytes_per_pixel = 4; // 32-bit float = 4 bytes
-        let unpadded_bytes_per_row = extent_width * bytes_per_pixel;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT; // 256
-        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) & !(align - 1);
-
-        let depth_staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Depth Copy Staging Buffer"),
-            size: (padded_bytes_per_row * extent_height) as u64,
-            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         Self {
             curvature_flow_pipeline,
             normals_pipeline,
             layout,
-            niterations: 1,
+            niterations: 50,
             alternate_depth1,
             alternate_depth2,
             normals,
@@ -657,44 +677,22 @@ impl CurvatureFlow {
                 depth_or_array_layers: 1,
             },
             uniform_buffer,
-            uniform,
-            depth_staging,
-            padded_bytes_per_row,
+            final_in_depth1: true,
         }
     }
 
     pub fn smooth(
-        &self,
+        &mut self,
         device: &wgpu::Device,
-        fluid_depth: &Texture,
+        eye_depth: &Texture,
         encoder: &mut wgpu::CommandEncoder,
     ) {
-        encoder.copy_texture_to_buffer(
+        encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &fluid_depth.texture,
+                texture: &eye_depth.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::DepthOnly,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.depth_staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bytes_per_row),
-                    rows_per_image: Some(self.extent.height),
-                },
-            },
-            self.extent,
-        );
-
-        encoder.copy_buffer_to_texture(
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.depth_staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bytes_per_row),
-                    rows_per_image: Some(self.extent.height),
-                },
+                aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyTextureInfo {
                 texture: &self.alternate_depth1.texture,
@@ -704,19 +702,18 @@ impl CurvatureFlow {
             },
             self.extent,
         );
-        let input = &self.alternate_depth1.view;
-        let output = &self.alternate_depth2.view;
+
         let bind_group1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(input),
+                    resource: wgpu::BindingResource::TextureView(&self.alternate_depth1.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(output),
+                    resource: wgpu::BindingResource::TextureView(&self.alternate_depth2.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -734,11 +731,11 @@ impl CurvatureFlow {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(output),
+                    resource: wgpu::BindingResource::TextureView(&self.alternate_depth2.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(input),
+                    resource: wgpu::BindingResource::TextureView(&self.alternate_depth1.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -750,25 +747,44 @@ impl CurvatureFlow {
                 },
             ],
         });
-        let (h, w) = (fluid_depth.texture.height(), fluid_depth.texture.width());
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        pass.set_pipeline(&self.curvature_flow_pipeline);
-        for i in 0..self.niterations {
-            let bg = if i % 2 == 0 {
+
+        let groups_x = self.extent.width.div_ceil(16);
+        let groups_y = self.extent.height.div_ceil(16);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.curvature_flow_pipeline);
+            for i in 0..self.niterations {
+                let bg = if i % 2 == 0 {
+                    &bind_group1
+                } else {
+                    &bind_group2
+                };
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(groups_x, groups_y, 1);
+            }
+
+            self.final_in_depth1 = self.niterations % 2 == 0;
+            let normals_bg = if self.final_in_depth1 {
                 &bind_group1
             } else {
                 &bind_group2
             };
-            pass.set_bind_group(0, bg, &[]);
-            pass.dispatch_workgroups(w / 16, h / 16, 1);
+            pass.set_pipeline(&self.normals_pipeline);
+            pass.set_bind_group(0, normals_bg, &[]);
+            pass.dispatch_workgroups(groups_x, groups_y, 1);
         }
-        pass.set_pipeline(&self.normals_pipeline);
-        pass.set_bind_group(0, &bind_group2, &[]);
-        pass.dispatch_workgroups(w / 16, h / 16, 1);
     }
 
     fn normal_map(&self) -> &wgpu::TextureView {
         &self.normals.view
+    }
+
+    fn smoothed_depth_view(&self) -> &wgpu::TextureView {
+        if self.final_in_depth1 {
+            &self.alternate_depth1.view
+        } else {
+            &self.alternate_depth2.view
+        }
     }
 }
 
@@ -921,7 +937,6 @@ impl ScreenSpaceRendering {
             depth: FluidDepth::new(
                 device,
                 &uniform_bind_group_layout,
-                surface_format,
                 extent_width,
                 extent_height,
             ),
@@ -940,7 +955,7 @@ impl ScreenSpaceRendering {
     /// performs fluid compaction (i.e. filter boundary particles out of the SPH buffer).
     /// make sure to use same encoder. this should be called before using draw()
     pub fn prepare(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         particles: &wgpu::Buffer,
         encoder: &mut wgpu::CommandEncoder,
@@ -961,8 +976,8 @@ impl ScreenSpaceRendering {
             self.n_fluid,
             uniforms,
         );
-        let depth_texture = &self.depth.depth_texture;
-        self.smoothing.smooth(device, depth_texture, encoder);
+        self.smoothing
+            .smooth(device, &self.depth.eye_depth_texture, encoder);
     }
 
     pub fn draw(
@@ -974,7 +989,7 @@ impl ScreenSpaceRendering {
         self.depth_viz.draw(
             device,
             self.smoothing.normal_map(),
-            &self.depth.depth_texture.view,
+            self.smoothing.smoothed_depth_view(),
             &self.thickness.thickness_texture().view,
             render_pass,
             uniforms,
