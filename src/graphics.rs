@@ -1,11 +1,14 @@
-use wgpu;
 use crate::texture::Texture;
+use wgpu;
 
+pub mod marching_cubes;
 mod pipelines;
-pub mod compute;
-pub use pipelines::{MeshRenderPipeline, RenderPipeline, RayPipeline};
-use std::fmt::Debug;
+mod ssfr;
 use flume::bounded;
+pub use marching_cubes::MarchingCubes;
+pub use pipelines::{MarchingCubesRenderPipeline, RenderPipeline, WireframeBoxPipeline};
+pub use ssfr::ScreenSpaceRendering;
+use std::fmt::Debug;
 
 pub(in crate::graphics) struct PipelineInfo<'a> {
     shader: &'a wgpu::ShaderModule,
@@ -101,22 +104,20 @@ impl BufferDebug {
         Self { staging_buffer }
     }
 
-    /// Copy `buffer` to CPU and `dbg!` it as `&[T]`.
-    ///
-    /// Submits its own copy command — do not rely on an in-flight encoder.
+    /// Copy `buffer[..count]` to CPU. Submits its own copy — not for in-flight encoders.
     /// `buffer` must have `COPY_SRC` usage.
-    pub fn log<T: bytemuck::Pod + bytemuck::Zeroable + Debug>(
+    pub fn read<T: bytemuck::Pod + bytemuck::Zeroable>(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         buffer: &wgpu::Buffer,
-    ) {
-        let size = buffer.size().min(self.staging_buffer.size());
+        count: u64,
+    ) -> Vec<T> {
+        let size = (count * std::mem::size_of::<T>() as u64).min(self.staging_buffer.size());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("BufferDebug copy"),
         });
         encoder.copy_buffer_to_buffer(buffer, 0, &self.staging_buffer, 0, size);
-        // The GPU copy must be submitted before we can map the staging buffer.
         queue.submit(std::iter::once(encoder.finish()));
 
         let (tx, rx) = bounded(1);
@@ -125,21 +126,28 @@ impl BufferDebug {
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = tx.send(result);
             });
-
         device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll while waiting for buffer map");
-
         rx.recv()
             .expect("map_async callback channel closed")
             .expect("buffer map failed");
 
-        {
+        let values = {
             let data = self.staging_buffer.slice(..size).get_mapped_range();
-            let values: &[T] = bytemuck::cast_slice(&data);
-            let p = &values[121.min(values.len().saturating_sub(1))];
-            dbg!(p);
-        }
+            bytemuck::cast_slice::<u8, T>(&data).to_vec()
+        };
         self.staging_buffer.unmap();
+        values
+    }
+
+    pub fn log<T: bytemuck::Pod + bytemuck::Zeroable + Debug>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        buffer: &wgpu::Buffer,
+    ) {
+        let n = buffer.size() / std::mem::size_of::<T>() as u64;
+        dbg!(self.read::<T>(device, queue, buffer, n));
     }
 }

@@ -1,7 +1,16 @@
-mod texture;
-mod physics;
 mod camera;
 mod graphics;
+mod physics;
+mod texture;
+use crate::camera::CameraController;
+use crate::graphics::{
+    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, ScreenSpaceRendering,
+    WireframeBoxPipeline,
+};
+use crate::physics::{
+    ContainerBoundary, CubicKernel, FluidParticle, FluidSim, assign_rest_densities, fluid_cube,
+};
+use crate::texture::Texture;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -11,52 +20,36 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
-use crate::texture::Texture;
-use crate::physics::{Cube, CubicKernel};
-use crate::camera::CameraController;
-use crate::graphics::{MeshRenderPipeline, RenderPipeline, RayPipeline};
-use crate::graphics::compute::PhysicsPipeline;
-use cgmath::SquareMatrix;
 
+use bytemuck;
+use cgmath::SquareMatrix;
+use nalgebra::Vector3;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::EventLoopExtWebSys;
-use bytemuck;
-use cgmath;
-use nalgebra::Vector3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum RenderMode {
+enum FluidRenderMode {
     Particles,
-    Mesh,
+    MarchingCubes,
+    ScreenSpaceFluidRendering,
 }
+// marching cubes slow and bad :(
+const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRendering;
 
-const RENDER_MODE: RenderMode = RenderMode::Mesh;
+const FLUID_GRID_N: usize = 30;
+const FLUID_SPACING: f32 = 0.03;
+const FLUID_PARTICLE_RADIUS: f32 = 0.020;
+const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.12, -0.7];
+const FLUID_CELL_SIZE: f32 = 0.1;
+const FLUID_CONTAINER_LAYERS: usize = 2;
+const FLUID_WORKGROUP: usize = 256;
+const ISO_LEVEL_STEP: f32 = 100.0;
 
-pub(crate) struct Ray {
-    start: cgmath::Point3<f32>,
-    end: cgmath::Point3<f32>,
-}
+const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
+const CONTAINER_MAX: [f32; 3] = [0.1, 1.85, 0.8];
 
-impl Ray {
-    pub fn project_to(&self, axis: Vector3<f32>) -> Vector3<f32> {
-        let e = Vector3::new(1.0, 1.0, 1.0);
-        let axis = axis.normalize();
-        let start = Vector3::new(self.start.x, self.start.y, self.start.z);
-        let end = Vector3::new(self.end.x, self.end.y, self.end.z);
-        let sum_r0 = e.dot(&start);
-        let dir = (end - start).normalize();
-        let sum_r = e.dot(&dir);
-        let sum_v = e.dot(&axis);
-        let u = (sum_r0 + sum_r0 * sum_r) / (1.0 + sum_r * sum_v);
-        let t = (sum_r0 - u * sum_v) / dir.norm();
-        let closest_to_axis = start + dir * t.max(0.0);
-        // project this to the axis
-        let projected = axis * closest_to_axis.dot(&axis);
-        projected
-    }
-}
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
     cgmath::Vector4::new(1.0, 0.0, 0.0, 0.0),
@@ -64,49 +57,6 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_co
     cgmath::Vector4::new(0.0, 0.0, 0.5, 0.0),
     cgmath::Vector4::new(0.0, 0.0, 0.5, 1.0),
 );
-
-pub(crate) struct MouseState {
-    position: winit::dpi::PhysicalPosition<f64>,
-    pub is_pressed: bool,
-}
-impl MouseState {
-    fn new() -> Self {
-        Self {
-            position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
-            is_pressed: false,
-        }
-    }
-    fn process_mouse_button(&mut self, button: MouseButton, state: ElementState) {
-        if button == MouseButton::Left && state == ElementState::Pressed {
-            self.is_pressed = true;
-        } else if button == MouseButton::Left && state == ElementState::Released {
-            self.is_pressed = false;
-        }
-    }
-    fn process_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
-        self.position = position;
-    }
-    fn world_ray(&self, camera: &Camera, viewport_width: f32, viewport_height: f32) -> Ray {
-        let viewport_width = viewport_width.max(1.0);
-        let viewport_height = viewport_height.max(1.0);
-        let ndc_x = (self.position.x as f32 / viewport_width) * 2.0 - 1.0;
-        let ndc_y = 1.0 - (self.position.y as f32 / viewport_height) * 2.0;
-        let inverse_view_projection = camera
-            .build_view_projection_matrix()
-            .invert()
-            .expect("camera view projection matrix must be invertible");
-        let near_clip = cgmath::Vector4::new(ndc_x, ndc_y, 0.0, 1.0);
-        let far_clip = cgmath::Vector4::new(ndc_x, ndc_y, 1.0, 1.0);
-        let near_world = inverse_view_projection * near_clip;
-        let far_world = inverse_view_projection * far_clip;
-        let near_world = near_world.truncate() / near_world.w;
-        let far_world = far_world.truncate() / far_world.w;
-        Ray {
-            start: cgmath::Point3::new(near_world.x, near_world.y, near_world.z),
-            end: cgmath::Point3::new(far_world.x, far_world.y, far_world.z),
-        }
-    }
-}
 
 pub(crate) struct Camera {
     eye: cgmath::Point3<f32>,
@@ -118,15 +68,16 @@ pub(crate) struct Camera {
     zfar: f32,
 }
 impl Camera {
-    fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
+    fn build_view_projection_matrix(&self) -> (cgmath::Matrix4<f32>, cgmath::Matrix4<f32>) {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
-        let projection = cgmath::perspective(
-            cgmath::Deg(self.fovy),
-            self.aspect,
-            self.znear,
-            self.zfar,
-        );
-        return OPENGL_TO_WGPU_MATRIX * projection * view;
+        let projection =
+            cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
+        return (OPENGL_TO_WGPU_MATRIX * projection, view);
+    }
+    fn focal_lengths(&self) -> (f32, f32) {
+        let focal_y = 1.0 / (self.fovy.to_radians() * 0.5).tan();
+        let focal_x = focal_y / self.aspect;
+        (focal_x, focal_y)
     }
 }
 pub struct State {
@@ -136,10 +87,11 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
     window: Arc<Window>,
-    render_pipeline: RenderPipeline,
-    mesh_pipeline: MeshRenderPipeline,
-    ray_pipeline: RayPipeline,
-    physics_pipeline: PhysicsPipeline,
+    container_pipeline: WireframeBoxPipeline,
+    fluid_pipeline: RenderPipeline,
+    marching_cubes: MarchingCubes,
+    screen_space_rendering: ScreenSpaceRendering,
+    mc_pipeline: MarchingCubesRenderPipeline,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -148,102 +100,54 @@ pub struct State {
     #[allow(unused)]
     camera_buffer: wgpu::Buffer,
     depth_texture: Texture,
-    #[allow(unused)]
-    object: Cube,
-    mouse_state: MouseState,
+    fluid_sim: FluidSim,
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
-    view_projection: [[f32; 4]; 4],
+    view: [[f32; 4]; 4],
+    projection: [[f32; 4]; 4],
+    view_proj_inv: [[f32; 4]; 4],
+    camera_pos: [f32; 3],
+    particle_radius: f32,
+    screen_height: f32,
+    _pad: [f32; 3],
 }
 impl CameraUniform {
     fn new() -> Self {
-        use cgmath::SquareMatrix;
         Self {
-            view_projection: cgmath::Matrix4::identity().into(),
+            view: cgmath::Matrix4::identity().into(),
+            projection: cgmath::Matrix4::identity().into(),
+            view_proj_inv: cgmath::Matrix4::identity().into(),
+            camera_pos: [0.0, 0.0, 0.0],
+            particle_radius: 0.5,
+            screen_height: 100.0,
+            _pad: [0.0; 3],
         }
     }
 
     fn update_view_projection(&mut self, camera: &Camera) {
-        self.view_projection = camera.build_view_projection_matrix().into();
+        let (projection, view) = camera.build_view_projection_matrix();
+        self.projection = projection.into();
+        self.view = view.into();
+        self.view_proj_inv = (projection * view).invert().unwrap().into();
+        self.camera_pos = camera.eye.into();
     }
 }
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-    normal: [f32; 3],
-}
-
-impl Vertex {
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: 224, 
-            step_mode: wgpu::VertexStepMode::Vertex,
-            // NOTE the offsets: they're from compute shader's `Particle` struct
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 32,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 52,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Uint32,
-                },
-            ],
-        }
-    }
-
-    pub(crate) fn set_color(&mut self, color: [f32; 3]) {
-        self.color = color;
-    }
-
-    pub(crate) fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
-        }
-    }
-}
-
 impl State {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor {
-                #[cfg(not(target_arch = "wasm32"))]
-                backends: wgpu::Backends::PRIMARY,
-                #[cfg(target_arch = "wasm32")]
-                backends: wgpu::Backends::GL,
-                flags: Default::default(),
-                memory_budget_thresholds: Default::default(),
-                backend_options: Default::default(),
-                display: None
-            }
-        );
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            #[cfg(not(target_arch = "wasm32"))]
+            backends: wgpu::Backends::PRIMARY,
+            #[cfg(target_arch = "wasm32")]
+            backends: wgpu::Backends::GL,
+            flags: Default::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: None,
+        });
         let surface = instance.create_surface(window.clone()).unwrap();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -252,7 +156,7 @@ impl State {
                 force_fallback_adapter: false,
             })
             .await?;
-        
+
         let device_limits = adapter.limits();
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -260,7 +164,8 @@ impl State {
         #[cfg(target_arch = "wasm32")]
         let mut required_limits = wgpu::Limits::downlevel_webgl2_defaults();
 
-        required_limits.max_storage_buffer_binding_size = device_limits.max_storage_buffer_binding_size;
+        required_limits.max_storage_buffer_binding_size =
+            device_limits.max_storage_buffer_binding_size;
         required_limits.max_buffer_size = device_limits.max_buffer_size;
 
         let (device, queue) = adapter
@@ -270,16 +175,18 @@ impl State {
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 required_limits,
                 memory_hints: Default::default(),
-                trace: wgpu::Trace::Off
+                trace: wgpu::Trace::Off,
             })
             .await?;
         let surface_capabilities = surface.get_capabilities(&adapter);
 
-        let surface_format = surface_capabilities.formats.iter()
+        let surface_format = surface_capabilities
+            .formats
+            .iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_capabilities.formats[0]);
-        
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -291,8 +198,8 @@ impl State {
             desired_maximum_frame_latency: 2,
         };
         let camera = Camera {
-            eye: (0.0, 1.0, 4.0).into(),
-            target: (0.0, 0.0, 0.0).into(),
+            eye: (-0.4, 1.4, 3.2).into(),
+            target: (-0.55, 0.55, -0.1).into(),
             up: (0.0, 1.0, 0.0).into(),
             aspect: config.width as f32 / config.height as f32,
             fovy: 45.0,
@@ -301,80 +208,113 @@ impl State {
         };
 
         let mut camera_uniform = CameraUniform::new();
+        camera_uniform.particle_radius = FLUID_PARTICLE_RADIUS;
+        camera_uniform.screen_height = config.height as f32;
         camera_uniform.update_view_projection(&camera);
-        let camera_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Camera buffer"),
-                contents: bytemuck::cast_slice(&[camera_uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            }
-        );
-        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Camera bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Camera bind group layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
-                    count: None
-                },
-            ],
-        });
+                    count: None,
+                }],
+            });
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                }
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
             label: Some("camera_bind_group"),
         });
 
-        let m = 10;
-        let kernel = CubicKernel::new(1.0 / (m - 1) as f32);
-        let cube = Cube::new(m, 1.0 / m as f32, &kernel);
-        let instances = cube.to_particle_renderable();
-        let render_pipeline = RenderPipeline::new(
+        let depth_texture =
+            Texture::create_depth_texture(&device, config.width, config.height, "Depth texture");
+        let container_pipeline = WireframeBoxPipeline::new(
             &device,
             &camera_bind_group_layout,
             config.format,
-            0.2 / m as f32,
-            &instances,
+            CONTAINER_MIN,
+            CONTAINER_MAX,
         );
-        let mesh_pipeline = MeshRenderPipeline::new(
-            &device,
-            &camera_bind_group_layout,
-            config.format,
-            &cube.surface_indices(),
-        );
-        let ray_pipeline = RayPipeline::new(&device, &camera_bind_group_layout, config.format);
-        let physics_pipeline = PhysicsPipeline::new(&device, Cube::new(m, 1.0 / m as f32, &kernel));
-        let depth_texture = Texture::create_depth_texture(&device, &config, "Depth texture");
 
-        Ok(Self { 
+        let mut fluid_particles =
+            fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
+        let n_fluid = fluid_particles.len() as u32;
+        let container = ContainerBoundary {
+            top_left: nalgebra::Point3::new(CONTAINER_MIN[0], CONTAINER_MIN[1], CONTAINER_MIN[2]),
+            bottom_right: nalgebra::Point3::new(
+                CONTAINER_MAX[0],
+                CONTAINER_MAX[1],
+                CONTAINER_MAX[2],
+            ),
+            nlayers: FLUID_CONTAINER_LAYERS,
+            spacing: FLUID_SPACING / 2.0,
+        };
+        let mut boundary_points = container.create_points(FLUID_CONTAINER_LAYERS);
+        assign_rest_densities(
+            &mut fluid_particles,
+            &mut boundary_points,
+            FLUID_SPACING,
+            &CubicKernel::new(FLUID_CELL_SIZE),
+        );
+        fluid_particles.append(&mut boundary_points);
+        let padded_len = fluid_particles.len().next_multiple_of(FLUID_WORKGROUP);
+        fluid_particles.resize(padded_len, FluidParticle::inert());
+
+        let fluid_sim = FluidSim::new(&device, &fluid_particles);
+        let fluid_pipeline = RenderPipeline::new(
+            &device,
+            &camera_bind_group_layout,
+            config.format,
+            FLUID_PARTICLE_RADIUS,
+        );
+        let marching_cubes = MarchingCubes::new(&device);
+        let mc_pipeline =
+            MarchingCubesRenderPipeline::new(&device, &camera_bind_group_layout, config.format);
+        // TODO: needs to be updated on screen resize
+        let (focal_x, focal_y) = camera.focal_lengths();
+        let screen_space_rendering = ScreenSpaceRendering::new(
+            &device,
+            camera_bind_group_layout,
+            fluid_particles.len() as u32,
+            n_fluid,
+            config.format,
+            size.width,
+            size.height,
+            focal_x,
+            focal_y,
+        );
+        Ok(Self {
             surface,
             device,
             queue,
             config,
             is_surface_configured: false,
             window,
-            render_pipeline,
-            mesh_pipeline,
-            ray_pipeline,
-            physics_pipeline,
+            container_pipeline,
+            fluid_pipeline,
+            marching_cubes,
+            mc_pipeline,
             camera,
             camera_controller: CameraController::new(),
             camera_bind_group,
             camera_buffer,
             camera_uniform,
             depth_texture,
-            object: cube,
-            mouse_state: MouseState::new(),
+            fluid_sim,
+            screen_space_rendering,
         })
     }
 
@@ -385,7 +325,11 @@ impl State {
             self.camera.aspect = width as f32 / height as f32;
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
-            self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "Depth texture");
+            let height = self.config.height;
+            let width = self.config.width;
+            self.depth_texture =
+                Texture::create_depth_texture(&self.device, width, height, "Depth texture");
+            self.camera_uniform.screen_height = height as f32;
         }
     }
 
@@ -402,24 +346,47 @@ impl State {
                 surface_texture
             }
             wgpu::CurrentSurfaceTexture::Timeout
-             | wgpu::CurrentSurfaceTexture::Occluded
-             | wgpu::CurrentSurfaceTexture::Validation => {
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Validation => {
                 return Ok(());
-             }
-            
-             wgpu::CurrentSurfaceTexture::Lost => {
-                anyhow::bail!("Device lost");
-             }
+            }
 
-             _ => anyhow::bail!("Unknown error")
+            wgpu::CurrentSurfaceTexture::Lost => {
+                anyhow::bail!("Device lost");
+            }
+
+            _ => anyhow::bail!("Unknown error"),
         };
 
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Command encoder for rendering"),
-        });
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Command encoder for rendering"),
+            });
 
-        self.physics_pipeline.compute(&self.device, &self.queue, &mut encoder);
+        self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
+
+        if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
+            self.marching_cubes.extract(
+                &self.device,
+                &mut encoder,
+                self.fluid_sim.particle_buffer(),
+                self.fluid_sim.hash_offsets_buffer(),
+            );
+        }
+
+        if FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering {
+            // perform compaction (filter out boundary particles) b4 creating render pass
+            self.screen_space_rendering.prepare(
+                &self.device,
+                self.fluid_sim.particle_buffer(),
+                &mut encoder,
+                &self.camera_bind_group,
+            );
+        }
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -430,10 +397,10 @@ impl State {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -450,11 +417,34 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            match RENDER_MODE {
-                RenderMode::Particles => self.render_pipeline.draw(&mut render_pass, &self.camera_bind_group),
-                RenderMode::Mesh => self.mesh_pipeline.draw(&mut render_pass, &self.camera_bind_group, &self.physics_pipeline.get_output_buffer()),
+
+            match FLUID_RENDER_MODE {
+                FluidRenderMode::Particles => {
+                    self.fluid_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        self.fluid_sim.particle_buffer(),
+                        self.fluid_sim.num_particles(),
+                    );
+                }
+                FluidRenderMode::MarchingCubes => {
+                    self.mc_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        self.marching_cubes.vertex_buffer(),
+                        self.marching_cubes.index_buffer(),
+                        self.marching_cubes.indirect_buffer(),
+                    );
+                }
+                FluidRenderMode::ScreenSpaceFluidRendering => self.screen_space_rendering.draw(
+                    &self.device,
+                    &mut render_pass,
+                    &self.camera_bind_group,
+                ),
             }
-            self.ray_pipeline.draw(&mut render_pass, &self.camera_bind_group);
+
+            self.container_pipeline
+                .draw(&mut render_pass, &self.camera_bind_group);
         }
 
         self.queue.submit([encoder.finish()]);
@@ -467,18 +457,44 @@ impl State {
             event_loop.exit();
             return;
         }
+        if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes && is_pressed {
+            let delta = match code {
+                KeyCode::BracketRight | KeyCode::Equal => ISO_LEVEL_STEP,
+                KeyCode::BracketLeft | KeyCode::Minus => -ISO_LEVEL_STEP,
+                _ => 0.0,
+            };
+            if delta != 0.0 {
+                let iso = self.marching_cubes.nudge_iso_level(&self.queue, delta);
+                self.window
+                    .set_title(&format!("fluids — iso level {iso:.1}"));
+                return;
+            }
+        }
         self.camera_controller.process_key(code, is_pressed);
+    }
+
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        if FLUID_RENDER_MODE != FluidRenderMode::MarchingCubes {
+            return;
+        }
+        let steps = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(pos) => (pos.y as f32 / 40.0),
+        };
+        let iso = self
+            .marching_cubes
+            .nudge_iso_level(&self.queue, steps * ISO_LEVEL_STEP);
+        self.window
+            .set_title(&format!("fluids — iso level {iso:.1}"));
     }
 
     fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
         self.camera_controller.process_mouse_button(button, state);
-        self.mouse_state.process_mouse_button(button, state);
     }
 
     fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
         self.camera_controller
             .process_cursor_moved(position, &mut self.camera);
-        self.mouse_state.process_cursor_moved(position);
     }
 
     fn update(&mut self) {
@@ -488,18 +504,6 @@ impl State {
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
-        );
-        let ray = self.mouse_state.world_ray(
-            &self.camera,
-            self.config.width as f32,
-            self.config.height as f32,
-        );
-        self.ray_pipeline.update(&self.queue, ray.start, ray.end, [0.2, 1.0, 0.2]);
-        self.physics_pipeline.update(
-            &self.queue,
-            ray.start,
-            ray.end,
-            self.mouse_state.is_pressed,
         );
     }
 }
@@ -556,13 +560,15 @@ impl ApplicationHandler<State> for App {
             // proxy to send the results to the event loop
             if let Some(proxy) = self.proxy.take() {
                 wasm_bindgen_futures::spawn_local(async move {
-                    assert!(proxy
-                        .send_event(
-                            State::new(window)
-                                .await
-                                .expect("Unable to create canvas!!!")
-                        )
-                        .is_ok())
+                    assert!(
+                        proxy
+                            .send_event(
+                                State::new(window)
+                                    .await
+                                    .expect("Unable to create canvas!!!")
+                            )
+                            .is_ok()
+                    )
                 });
             }
         }
@@ -598,7 +604,7 @@ impl ApplicationHandler<State> for App {
             WindowEvent::RedrawRequested => {
                 state.update();
                 match state.render() {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => {
                         log::error!("{e:?}");
                         event_loop.exit();
@@ -614,11 +620,18 @@ impl ApplicationHandler<State> for App {
                     },
                 ..
             } => state.handle_key(event_loop, code, key_state.is_pressed()),
-            WindowEvent::MouseInput { state: button_state, button, .. } => {
+            WindowEvent::MouseInput {
+                state: button_state,
+                button,
+                ..
+            } => {
                 state.handle_mouse_button(button, button_state);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 state.handle_cursor_moved(position);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                state.handle_mouse_wheel(delta);
             }
             _ => {}
         }
