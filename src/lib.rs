@@ -40,7 +40,7 @@ const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRend
 
 const FLUID_GRID_N: usize = 30;
 const FLUID_SPACING: f32 = 0.03;
-const FLUID_PARTICLE_RADIUS: f32 = 0.014;
+const FLUID_PARTICLE_RADIUS: f32 = 0.028;
 const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.12, -0.7];
 const FLUID_CELL_SIZE: f32 = 0.1;
 const FLUID_CONTAINER_LAYERS: usize = 2;
@@ -108,18 +108,22 @@ pub struct State {
 struct CameraUniform {
     view: [[f32; 4]; 4],
     projection: [[f32; 4]; 4],
+    view_proj_inv: [[f32; 4]; 4],
+    camera_pos: [f32; 3],
     particle_radius: f32,
     screen_height: f32,
-    _pad: [f32; 2],
+    _pad: [f32; 3],
 }
 impl CameraUniform {
     fn new() -> Self {
         Self {
             view: cgmath::Matrix4::identity().into(),
             projection: cgmath::Matrix4::identity().into(),
+            view_proj_inv: cgmath::Matrix4::identity().into(),
+            camera_pos: [0.0, 0.0, 0.0],
             particle_radius: 0.5,
             screen_height: 100.0,
-            _pad: [0.0; 2],
+            _pad: [0.0; 3],
         }
     }
 
@@ -127,6 +131,8 @@ impl CameraUniform {
         let (projection, view) = camera.build_view_projection_matrix();
         self.projection = projection.into();
         self.view = view.into();
+        self.view_proj_inv = (projection * view).invert().unwrap().into();
+        self.camera_pos = camera.eye.into();
     }
 }
 impl State {

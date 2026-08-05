@@ -779,7 +779,11 @@ struct DepthViz {
 }
 
 impl DepthViz {
-    fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        uniform_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         let module = device.create_shader_module(wgpu::include_wgsl!("visualize_depth.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("depth viz"),
@@ -804,11 +808,21 @@ impl DepthViz {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("depth viz"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&layout), Some(uniform_bind_group_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -848,9 +862,11 @@ impl DepthViz {
     fn draw(
         &self,
         device: &wgpu::Device,
+        normal_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         thickness_view: &wgpu::TextureView,
         render_pass: &mut wgpu::RenderPass,
+        uniforms: &wgpu::BindGroup,
     ) {
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("depth viz"),
@@ -858,16 +874,21 @@ impl DepthViz {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(depth_view),
+                    resource: wgpu::BindingResource::TextureView(normal_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(thickness_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(depth_view),
+                },
             ],
         });
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &bg, &[]);
+        render_pass.set_bind_group(1, uniforms, &[]);
         render_pass.draw(0..3, 0..1);
     }
 }
@@ -904,6 +925,7 @@ impl ScreenSpaceRendering {
                 extent_width,
                 extent_height,
             ),
+            depth_viz: DepthViz::new(device, surface_format, &uniform_bind_group_layout),
             thickness: FluidThickness::new(
                 device,
                 uniform_bind_group_layout,
@@ -911,7 +933,6 @@ impl ScreenSpaceRendering {
                 extent_height,
             ),
             smoothing: CurvatureFlow::new(device, extent_width, extent_height, focal_x, focal_y),
-            depth_viz: DepthViz::new(device, surface_format),
             n_fluid,
         }
     }
@@ -953,8 +974,10 @@ impl ScreenSpaceRendering {
         self.depth_viz.draw(
             device,
             self.smoothing.normal_map(),
+            &self.depth.depth_texture.view,
             &self.thickness.thickness_texture().view,
             render_pass,
+            uniforms,
         );
     }
 }

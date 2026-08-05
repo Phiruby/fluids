@@ -1,6 +1,8 @@
 struct CameraUniform {
     view: mat4x4<f32>,
     projection: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    camera_pos: vec3<f32>,
     particle_radius: f32,
     screen_height: f32,
 }
