@@ -54,54 +54,91 @@ fn neighbor_hashes(idx: u32) -> array<u32, 27> {
 
 // cubic spline kernel (L2 support radius = CELL_SIZE)
 fn kernel_weight(i: u32, j: u32) -> f32 {
-  let q = distance(particles[j].position, particles[i].position) / CELL_SIZE;
-  if (0 <= q && q <= 0.5) {
-      return SIGMA * (6.0 * pow(q, 3.0) - 6.0 * pow(q, 2.0) + 1.0);
-  } else if (0.5 < q && q <= 1.0) {
-    return SIGMA * 2.0 * pow(1 - q, 3.0);
-  }
-  return 0.0;
+    let q = distance(particles[j].position, particles[i].position) / CELL_SIZE;
+    if 0 <= q && q <= 0.5 {
+        return SIGMA * (6.0 * pow(q, 3.0) - 6.0 * pow(q, 2.0) + 1.0);
+    } else if 0.5 < q && q <= 1.0 {
+        return SIGMA * 2.0 * pow(1 - q, 3.0);
+    }
+    return 0.0;
+}
+
+fn kernel_gradient(i: u32, j: u32) -> vec3<f32> {
+    let r = particles[i].position - particles[j].position;
+    let r_norm = length(r);
+    if r_norm == 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let q = r_norm / CELL_SIZE;
+    let dq_dx = r / (CELL_SIZE * r_norm);
+    if 0.0 <= q && q <= 0.5 {
+        return SIGMA * (18.0 * q * q - 12.0 * q) * dq_dx;
+    } else if 0.5 < q && q <= 1.0 {
+        return SIGMA * (-6.0 * (1.0 - q) * (1.0 - q)) * dq_dx;
+    }
+    return vec3<f32>(0.0);
 }
 
 fn is_finite(x: f32) -> bool {
-  // NaN: x != x; Inf: x*0 != 0
-  return (x == x) && (x * 0.0 == 0.0);
+    // NaN: x != x; Inf: x*0 != 0
+    return (x == x) && (x * 0.0 == 0.0);
 }
 
 // computes delta density;
 // for boundary particles, the output will always be 0 (we will maintain same density for boundaries)
 fn compute_density(idx: u32) -> f32 {
-   let neighbors = neighbor_hashes(idx);
-   var density: f32 = 0.0;
-   let is_fluid = f32(particles[idx].boundary);
-   for (var i: u32 = 0u; i < 27u; i++) {
-    let offset = hash_offsets[neighbors[i]];
-    let start = offset.x;
-    let end = offset.y;
-    for (var j: u32 = start; j < end; j++) {
-      if (distance(particles[j].position, particles[idx].position) <= CELL_SIZE) {
-        let kw = kernel_weight(idx, j);
-        density += is_fluid * particles[j].mass * kw;
+    let neighbors = neighbor_hashes(idx);
+    var density: f32 = 0.0;
+    let is_fluid = f32(particles[idx].boundary);
+    for (var i: u32 = 0u; i < 27u; i++) {
+        let offset = hash_offsets[neighbors[i]];
+        let start = offset.x;
+        let end = offset.y;
+        for (var j: u32 = start; j < end; j++) {
+            if distance(particles[j].position, particles[idx].position) <= CELL_SIZE {
+                let kw = kernel_weight(idx, j);
+                density += is_fluid * particles[j].mass * kw;
 
-        if (!is_finite(particles[j].mass) || !is_finite(f32(is_fluid)) || !is_finite(kw)) {
-          debug[idx] = vec3<f32>(f32(particles[j].density), particles[j].rest_density, f32(particles[j].boundary));
+                if !is_finite(particles[j].mass) || !is_finite(f32(is_fluid)) || !is_finite(kw) {
+                    debug[idx] = vec3<f32>(f32(particles[j].density), particles[j].rest_density, f32(particles[j].boundary));
+                }
+            }
         }
-      }
     }
-  }
-  return density;
+    return density;
+}
+
+// Eq (125) https://arxiv.org/pdf/2009.06944
+fn compute_normals(idx: u32) -> vec3<f32> {
+    let neighbors = neighbor_hashes(idx);
+    var normal: vec3<f32> = vec3<f32>(0.0);
+    let is_fluid = f32(particles[idx].boundary);
+    for (var i: u32 = 0u; i < 27u; i++) {
+        let offset = hash_offsets[neighbors[i]];
+        let start = offset.x;
+        let end = offset.y;
+        for (var j: u32 = start; j < end; j++) {
+            if distance(particles[j].position, particles[idx].position) <= CELL_SIZE {
+                let ratio = particles[j].mass / particles[j].density;
+                normal += ratio * kernel_gradient(idx, j);
+            }
+        }
+    }
+    return CELL_SIZE * normal;
 }
 
 // computes densities and nabla W_{ij}
 @compute
 @workgroup_size(256)
 fn compute_quantities(@builtin(global_invocation_id) gid: vec3<u32>) {
-  // NOTE: ok to write back to same input buffer since computed quantities here do not make use of density;
-  // so no race conditions
-  let rho = compute_density(gid.x);
-  if (particles[gid.x].boundary == 0u) {
-    particles[gid.x].density = particles[gid.x].rest_density;
-  } else {
-    particles[gid.x].density = rho;
-  }
+    // NOTE: ok to write back to same input buffer since computed quantities here do not make use of density;
+    // so no race conditions
+    let rho = compute_density(gid.x);
+    let normal = compute_normals(gid.x);
+    if particles[gid.x].boundary == 0u {
+        particles[gid.x].density = particles[gid.x].rest_density;
+    } else {
+        particles[gid.x].density = rho;
+    }
+    particles[gid.x].normal = normal;
 }

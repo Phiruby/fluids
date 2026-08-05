@@ -12,9 +12,11 @@ struct Particle {
 // NOTE: this should be synced with spatial_hash.wgsl
 const CELL_SIZE: f32 = 0.1;
 const HASHTABLE_SIZE: u32 = 8192u;
-const SIGMA = 8.0 / (3.14159 * pow(CELL_SIZE, 3.0));
+const PI = 3.14159265358979323846;
+const SIGMA = 8.0 / (PI * pow(CELL_SIZE, 3.0));
 const DT: f32 = 0.002;
 const K: f32 = 50.0;
+const ALPHA: f32 = 1.0; // for cohesision
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> hash_offsets: array<vec2<u32>>;
@@ -54,6 +56,18 @@ fn neighbor_hashes(idx: u32) -> array<u32, 27> {
     return neighbors;
 }
 
+fn cohesion_kernel(i: u32, j: u32) -> f32 {
+    let r = length(particles[i].position - particles[j].position);
+    let scale = 32 / (PI * pow(CELL_SIZE, 9.0));
+    if 2 * r > CELL_SIZE && r <= CELL_SIZE {
+        return scale * pow(CELL_SIZE - r, 3.0) * pow(r, 3.0);
+    }
+    if r > 0 && 2 * r <= CELL_SIZE {
+        return scale * 2 * pow(CELL_SIZE - r, 3.0) * pow(r, 3.0) - pow(CELL_SIZE, 6.0) / 64;
+    }
+    return 0.0;
+}
+
 // gradient w.r.t first input for cubic spline kernel (L2)
 fn kernel_gradient(i: u32, j: u32) -> vec3<f32> {
     let r = particles[i].position - particles[j].position;
@@ -69,6 +83,30 @@ fn kernel_gradient(i: u32, j: u32) -> vec3<f32> {
         return SIGMA * (-6.0 * (1.0 - q) * (1.0 - q)) * dq_dx;
     }
     return vec3<f32>(0.0);
+}
+
+fn surface_tension_force(idx: u32) -> vec3<f32> {
+    let neighbors = neighbor_hashes(idx);
+    var surface_tension_force: vec3<f32> = vec3<f32>(0.0);
+    let m_i = particles[idx].mass;
+    let rho0 = particles[idx].rest_density;
+    for (var i: u32 = 0u; i < 27u; i++) {
+        let offset = hash_offsets[neighbors[i]];
+        let start = offset.x;
+        let end = offset.y;
+        for (var j: u32 = start; j < end; j++) {
+            if distance(particles[j].position, particles[idx].position) <= CELL_SIZE {
+                let is_fluid = f32(particles[j].boundary);
+                var dir: vec3<f32> = particles[idx].position - particles[j].position;
+                dir = normalize(dir);
+                let cohesion_force = -ALPHA * m_i * particles[j].mass * cohesion_kernel(idx, j);
+                let curvature_force = -ALPHA * m_i * (particles[idx].normal - particles[j].normal);
+                let Kij = 2 * rho0 / (particles[idx].density + particles[j].density);
+                surface_tension_force += Kij * (cohesion_force + curvature_force);
+            }
+        }
+    }
+    return surface_tension_force;
 }
 
 // Eqn (102) from https://arxiv.org/pdf/2009.06944
@@ -147,6 +185,8 @@ fn simulate(@builtin(global_invocation_id) gid: vec3<u32>) {
     // given that the viscocity force needs to be multiplied by mu, not nu)
     let viscosity = 200.0 * viscous_force(gid.x) / density;
     let pressure_acceleration = pressure_gradient(gid.x);
+    let surface_tension_force = surface_tension_force(gid.x) / particles[gid.x].mass;
+
     let dv = (viscosity + pressure_acceleration + vec3<f32>(0.0, -9.81, 0.0)) * DT;
     particle.velocity += dv;
     particle.position += particle.velocity * DT;
