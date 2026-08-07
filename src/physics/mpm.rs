@@ -1,9 +1,19 @@
 use crate::physics::{MpmFluidParticle, MpmGridNode};
 use wgpu::util::DeviceExt;
 
-/// keep this in sync with @p2g.wgsl
-const N: u64 = 32;
+pub const MPM_N: u32 = 64;
+pub const MPM_DX: f32 = 0.1;
+pub const MPM_BOTTOM_LEFT: [f32; 3] = [-1.0, 1.0, -1.0];
+
+const N: u64 = MPM_N as u64;
 const WG_SIZE: u32 = 256;
+
+pub fn mpm_grid_bounds() -> ([f32; 3], [f32; 3]) {
+    let min = MPM_BOTTOM_LEFT;
+    let extent = MPM_N as f32 * MPM_DX;
+    let max = [min[0] + extent, min[1] + extent, min[2] + extent];
+    (min, max)
+}
 
 /// interpolate data from particles to grid nodes
 struct P2G {
@@ -288,5 +298,58 @@ impl MpmFluidSim {
 
     pub fn num_particles(&self) -> u32 {
         self.num_particles
+    }
+}
+
+#[cfg(test)]
+mod mpm_step_tests {
+    use super::*;
+    use crate::graphics::BufferDebug;
+    use crate::physics::mpm_fluid_cube;
+    use nalgebra::Vector3;
+
+    fn gpu() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .expect("adapter");
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("device")
+    }
+
+    #[test]
+    fn particles_move_after_step() {
+        let (device, queue) = gpu();
+        let particles = mpm_fluid_cube(4, 0.02, Vector3::new(-0.9, 1.1, -0.9));
+        let before = particles[0].position;
+        let sim = MpmFluidSim::new(&device, &particles);
+        let dbg = BufferDebug::new(&device, sim.particles.size());
+        let grid_dbg = BufferDebug::new(&device, sim.p2g.grid.size());
+
+        let mut enc = device.create_command_encoder(&Default::default());
+        sim.step(&device, &mut enc);
+        queue.submit(Some(enc.finish()));
+
+        let after = dbg.read::<MpmFluidParticle>(&device, &queue, &sim.particles, particles.len() as u64);
+        let grid = grid_dbg.read::<MpmGridNode>(&device, &queue, &sim.p2g.grid, (N * N * N) as u64);
+        let nonzero_mass = grid.iter().filter(|n| n.mass > 0).count();
+        let max_mass = grid.iter().map(|n| n.mass).max().unwrap_or(0);
+        let max_force_y = grid.iter().map(|n| n.force_y).max().unwrap_or(0);
+        let max_mom_y = grid.iter().map(|n| n.momentum_y).max().unwrap_or(0);
+
+        eprintln!("before={before:?}");
+        eprintln!("after[0]={:?}", after[0].position);
+        eprintln!("after[0].velocity={:?}", after[0].velocity);
+        eprintln!("nonzero_mass_nodes={nonzero_mass} max_mass={max_mass}");
+        eprintln!("max_force_y={max_force_y} max_mom_y={max_mom_y}");
+        eprintln!("pos delta={:?}", [
+            after[0].position[0] - before[0],
+            after[0].position[1] - before[1],
+            after[0].position[2] - before[2],
+        ]);
+
+        assert!(nonzero_mass > 0, "P2G deposited no mass");
+        assert!(
+            after[0].position != before || after[0].velocity != [0.0; 3],
+            "particle did not move or gain velocity"
+        );
     }
 }

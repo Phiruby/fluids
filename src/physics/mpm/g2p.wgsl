@@ -18,9 +18,9 @@ struct GridParticle {
     force_z: i32,
 }
 
-const DX: f32 = 0.02;
+const DX: f32 = 0.1;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.0, 1.0, -1.0);
-const N: u32 = 32u;
+const N: u32 = 64u;
 const FIXED_POINT_SCALE: f32 = 4096.0;
 const D_INV = 3.0 / (DX * DX);
 const GAMMA = 7.0;
@@ -63,6 +63,10 @@ fn grid_to_particles(@builtin(global_invocation_id) id: vec3<u32>) {
     let base_coord_f = relative_pos / DX;
     let base_coord = vec3<i32>(floor(base_coord_f - 0.5));
 
+    var new_v = vec3<f32>(0.0);
+    var new_B = mat3x3<f32>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var new_pos = vec3<f32>(0.0);
+
     for (var i = 0; i < 3; i++) {
         for (var j = 0; j < 3; j++) {
             for (var k = 0; k < 3; k++) {
@@ -81,27 +85,27 @@ fn grid_to_particles(@builtin(global_invocation_id) id: vec3<u32>) {
                 let linear_grid_idx = get_grid_index(vec3<u32>(current_coord));
 
                 if grid[linear_grid_idx].mass <= 0 { continue; }
-                // no need to rescale by 1/FIFIXED_POINT_SCALE since dividing by mass cancels it out
+                // no need to rescale by 1/FIXED_POINT_SCALE since dividing by mass cancels it out
                 let vi = vec3<f32>(
                     f32(grid[linear_grid_idx].momentum_x),
                     f32(grid[linear_grid_idx].momentum_y),
                     f32(grid[linear_grid_idx].momentum_z),
                 ) / f32(grid[linear_grid_idx].mass);
-                let updated_grid_loc = node_pos + DT * vi;
-                p.velocity = p.velocity + vi * weight;
-                let newpos = p.position + node_pos * weight;
-                let d = node_pos - p.position + updated_grid_loc - newpos;
-                p.B = p.B + 0.5 * weight * (outer(vi, d) + outer(d, vi));
-                p.position = newpos;
+                new_v += vi * weight;
+                new_B += weight * outer(vi, xi_xp);
+                let increment_pos = node_pos + vi * DT;
+                new_pos += increment_pos * weight;
             }
         }
     }
+    p.velocity = new_v;
+    p.B = new_B;
     // eq (17)
     let C = D_INV * p.B;
     let identity = mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
     p.deformation_gradient = (identity + DT * C) * p.deformation_gradient;
-
-    // step forward (can move to separate pass once we pass plasticity)
-    p.position += p.velocity * DT;
+    // p.position += p.velocity * DT;
+    // this is equivalent to p.position += p.velocity * DT (quadratic B spline has partition of unity)
+    p.position = new_pos;
     particles[p_idx] = p;
 }

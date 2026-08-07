@@ -4,7 +4,7 @@ mod sph;
 use nalgebra::Vector3;
 use std::ops::Add;
 
-pub use mpm::MpmFluidSim;
+pub use mpm::{MpmFluidSim, mpm_grid_bounds};
 pub(crate) use pipelines::PrefixSum;
 pub use sph::boundaries::ContainerBoundary;
 pub use sph::fluids::FluidSim;
@@ -136,10 +136,6 @@ fn wgsl_mat3_identity() -> WgslMat3 {
     ]
 }
 
-fn wgsl_mat3_zero() -> WgslMat3 {
-    [[0.0; 4]; 3]
-}
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MpmFluidParticle {
@@ -148,24 +144,22 @@ pub struct MpmFluidParticle {
     pub position: [f32; 3],
     _pad0: f32,
     pub velocity: [f32; 3],
-    _pad1: f32,
     pub rest_volume: f32,
     pub mass: f32,
-    _pad2: [f32; 2],
+    _pad1: [f32; 3],
 }
 
 impl Default for MpmFluidParticle {
     fn default() -> Self {
         Self {
-            deformation_gradient: wgsl_mat3_zero(),
-            b: wgsl_mat3_zero(),
+            deformation_gradient: wgsl_mat3_identity(),
+            b: [[0.0; 4]; 3],
             position: [0.0; 3],
             _pad0: 0.0,
             velocity: [0.0; 3],
-            _pad1: 0.0,
             rest_volume: 0.0,
             mass: 0.0,
-            _pad2: [0.0; 2],
+            _pad1: [0.0; 3],
         }
     }
 }
@@ -252,7 +246,7 @@ pub fn mpm_fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<MpmFl
             for k in 0..n {
                 particles.push(MpmFluidParticle {
                     deformation_gradient: wgsl_mat3_identity(),
-                    b: wgsl_mat3_zero(),
+                    b: [[0.0; 4]; 3],
                     position: [
                         origin.x + i as f32 * spacing,
                         origin.y + j as f32 * spacing,

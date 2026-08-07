@@ -18,9 +18,9 @@ struct GridParticle {
     force_z: atomic<i32>,
 }
 
-const DX: f32 = 0.02;
+const DX: f32 = 0.1;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.0, 1.0, -1.0);
-const N: u32 = 32u;
+const N: u32 = 64u;
 const FIXED_POINT_SCALE: f32 = 4096.0;
 const D_INV = 3.0 / (DX * DX);
 const GAMMA = 7.0;
@@ -83,7 +83,7 @@ fn particles_to_grid(@builtin(global_invocation_id) id: vec3<u32>) {
                 let momentum_contribution = mass_contribution * total_velocity;
                 let force_contribution = weight * p.rest_volume 
                   * D_INV * fluid_pressure(id.x) * xi_xp
-                  + weight * p.mass * vec3<f32>(0.0, 9.81, 0.0);
+                  - weight * p.mass * vec3<f32>(0.0, 9.81, 0.0);
 
                 let linear_grid_idx = get_grid_index(vec3<u32>(current_coord));
 

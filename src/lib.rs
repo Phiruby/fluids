@@ -4,12 +4,12 @@ mod physics;
 mod texture;
 use crate::camera::CameraController;
 use crate::graphics::{
-    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, ScreenSpaceRendering,
+    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, ScreenSpaceRendering, WireframeBox,
     WireframeBoxPipeline,
 };
 use crate::physics::{
     ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmFluidParticle, MpmFluidSim,
-    assign_rest_densities, fluid_cube, mpm_fluid_cube,
+    assign_rest_densities, fluid_cube, mpm_fluid_cube, mpm_grid_bounds,
 };
 use crate::texture::Texture;
 use std::sync::Arc;
@@ -36,13 +36,21 @@ enum FluidRenderMode {
     MarchingCubes,
     ScreenSpaceFluidRendering,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SimBackend {
+    Sph,
+    Mpm,
+}
+
+const SIM_BACKEND: SimBackend = SimBackend::Mpm;
 // marching cubes slow and bad :(
 const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::Particles;
 
 const FLUID_GRID_N: usize = 30;
 const FLUID_SPACING: f32 = 0.03;
 const FLUID_PARTICLE_RADIUS: f32 = 0.020;
-const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.12, -0.7];
+const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.50, -0.7];
 const FLUID_CELL_SIZE: f32 = 0.1;
 const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
@@ -50,7 +58,7 @@ const ISO_LEVEL_STEP: f32 = 100.0;
 
 const MPM_GRID_N: usize = 16;
 const MPM_SPACING: f32 = 0.02;
-const MPM_ORIGIN: [f32; 3] = [-0.9, 1.1, -0.9];
+const MPM_ORIGIN: [f32; 3] = [-0.9, 1.5, -0.9];
 const MPM_PARTICLE_RADIUS: f32 = 0.012;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
@@ -93,7 +101,9 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
     window: Arc<Window>,
-    container_pipeline: WireframeBoxPipeline,
+    wireframe_pipeline: WireframeBoxPipeline,
+    sph_wireframe: WireframeBox,
+    mpm_wireframe: WireframeBox,
     fluid_pipeline: RenderPipeline<FluidParticle>,
     mpm_pipeline: RenderPipeline<MpmFluidParticle>,
     marching_cubes: MarchingCubes,
@@ -249,13 +259,12 @@ impl State {
 
         let depth_texture =
             Texture::create_depth_texture(&device, config.width, config.height, "Depth texture");
-        let container_pipeline = WireframeBoxPipeline::new(
-            &device,
-            &camera_bind_group_layout,
-            config.format,
-            CONTAINER_MIN,
-            CONTAINER_MAX,
-        );
+        let wireframe_pipeline =
+            WireframeBoxPipeline::new(&device, &camera_bind_group_layout, config.format);
+        let sph_wireframe =
+            WireframeBox::new(&device, CONTAINER_MIN, CONTAINER_MAX, [0.25, 0.95, 0.35]);
+        let (mpm_min, mpm_max) = mpm_grid_bounds();
+        let mpm_wireframe = WireframeBox::new(&device, mpm_min, mpm_max, [0.95, 0.55, 0.2]);
 
         let mut fluid_particles =
             fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
@@ -319,7 +328,9 @@ impl State {
             config,
             is_surface_configured: false,
             window,
-            container_pipeline,
+            wireframe_pipeline,
+            sph_wireframe,
+            mpm_wireframe,
             fluid_pipeline,
             mpm_pipeline,
             marching_cubes,
@@ -385,10 +396,16 @@ impl State {
                 label: Some("Command encoder for rendering"),
             });
 
-        self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
-        self.mpm_fluid_sim.step(&self.device, &mut encoder);
+        match SIM_BACKEND {
+            SimBackend::Sph => {
+                self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
+            }
+            SimBackend::Mpm => {
+                self.mpm_fluid_sim.step(&self.device, &mut encoder);
+            }
+        }
 
-        if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
+        if SIM_BACKEND == SimBackend::Sph && FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
             self.marching_cubes.extract(
                 &self.device,
                 &mut encoder,
@@ -397,7 +414,9 @@ impl State {
             );
         }
 
-        if FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering {
+        if SIM_BACKEND == SimBackend::Sph
+            && FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering
+        {
             // perform compaction (filter out boundary particles) b4 creating render pass
             self.screen_space_rendering.prepare(
                 &self.device,
@@ -437,39 +456,52 @@ impl State {
                 multiview_mask: None,
             });
 
-            match FLUID_RENDER_MODE {
-                FluidRenderMode::Particles => {
-                    self.fluid_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        self.fluid_sim.particle_buffer(),
-                        self.fluid_sim.num_particles(),
-                    );
-                    self.mpm_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        self.mpm_fluid_sim.particle_buffer(),
-                        self.mpm_fluid_sim.num_particles(),
-                    );
-                }
-                FluidRenderMode::MarchingCubes => {
-                    self.mc_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        self.marching_cubes.vertex_buffer(),
-                        self.marching_cubes.index_buffer(),
-                        self.marching_cubes.indirect_buffer(),
-                    );
-                }
-                FluidRenderMode::ScreenSpaceFluidRendering => self.screen_space_rendering.draw(
-                    &self.device,
-                    &mut render_pass,
-                    &self.camera_bind_group,
-                ),
+            match SIM_BACKEND {
+                SimBackend::Sph => match FLUID_RENDER_MODE {
+                    FluidRenderMode::Particles => {
+                        self.fluid_pipeline.draw(
+                            &mut render_pass,
+                            &self.camera_bind_group,
+                            self.fluid_sim.particle_buffer(),
+                            self.fluid_sim.num_particles(),
+                        );
+                    }
+                    FluidRenderMode::MarchingCubes => {
+                        self.mc_pipeline.draw(
+                            &mut render_pass,
+                            &self.camera_bind_group,
+                            self.marching_cubes.vertex_buffer(),
+                            self.marching_cubes.index_buffer(),
+                            self.marching_cubes.indirect_buffer(),
+                        );
+                    }
+                    FluidRenderMode::ScreenSpaceFluidRendering => {
+                        self.screen_space_rendering.draw(
+                            &self.device,
+                            &mut render_pass,
+                            &self.camera_bind_group,
+                        );
+                    }
+                },
+                SimBackend::Mpm => match FLUID_RENDER_MODE {
+                    FluidRenderMode::Particles => {
+                        self.mpm_pipeline.draw(
+                            &mut render_pass,
+                            &self.camera_bind_group,
+                            self.mpm_fluid_sim.particle_buffer(),
+                            self.mpm_fluid_sim.num_particles(),
+                        );
+                    }
+                    _ => panic!("Mpm does not support rendering modes other than particles"),
+                },
             }
 
-            self.container_pipeline
-                .draw(&mut render_pass, &self.camera_bind_group);
+            let wireframe = match SIM_BACKEND {
+                SimBackend::Sph => &self.sph_wireframe,
+                SimBackend::Mpm => &self.mpm_wireframe,
+            };
+            self.wireframe_pipeline
+                .draw(&mut render_pass, &self.camera_bind_group, wireframe);
         }
 
         self.queue.submit([encoder.finish()]);
