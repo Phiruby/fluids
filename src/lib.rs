@@ -8,7 +8,8 @@ use crate::graphics::{
     WireframeBoxPipeline,
 };
 use crate::physics::{
-    ContainerBoundary, CubicKernel, FluidParticle, FluidSim, assign_rest_densities, fluid_cube,
+    ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmFluidParticle, MpmFluidSim,
+    assign_rest_densities, fluid_cube, mpm_fluid_cube,
 };
 use crate::texture::Texture;
 use std::sync::Arc;
@@ -36,7 +37,7 @@ enum FluidRenderMode {
     ScreenSpaceFluidRendering,
 }
 // marching cubes slow and bad :(
-const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRendering;
+const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::Particles;
 
 const FLUID_GRID_N: usize = 30;
 const FLUID_SPACING: f32 = 0.03;
@@ -46,6 +47,11 @@ const FLUID_CELL_SIZE: f32 = 0.1;
 const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
+
+const MPM_GRID_N: usize = 16;
+const MPM_SPACING: f32 = 0.02;
+const MPM_ORIGIN: [f32; 3] = [-0.9, 1.1, -0.9];
+const MPM_PARTICLE_RADIUS: f32 = 0.012;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
 const CONTAINER_MAX: [f32; 3] = [0.1, 1.85, 0.8];
@@ -88,7 +94,8 @@ pub struct State {
     is_surface_configured: bool,
     window: Arc<Window>,
     container_pipeline: WireframeBoxPipeline,
-    fluid_pipeline: RenderPipeline,
+    fluid_pipeline: RenderPipeline<FluidParticle>,
+    mpm_pipeline: RenderPipeline<MpmFluidParticle>,
     marching_cubes: MarchingCubes,
     screen_space_rendering: ScreenSpaceRendering,
     mc_pipeline: MarchingCubesRenderPipeline,
@@ -101,6 +108,7 @@ pub struct State {
     camera_buffer: wgpu::Buffer,
     depth_texture: Texture,
     fluid_sim: FluidSim,
+    mpm_fluid_sim: MpmFluidSim,
 }
 
 #[repr(C)]
@@ -274,11 +282,19 @@ impl State {
         fluid_particles.resize(padded_len, FluidParticle::inert());
 
         let fluid_sim = FluidSim::new(&device, &fluid_particles);
+        let mpm_particles = mpm_fluid_cube(MPM_GRID_N, MPM_SPACING, Vector3::from(MPM_ORIGIN));
+        let mpm_fluid_sim = MpmFluidSim::new(&device, &mpm_particles);
         let fluid_pipeline = RenderPipeline::new(
             &device,
             &camera_bind_group_layout,
             config.format,
             FLUID_PARTICLE_RADIUS,
+        );
+        let mpm_pipeline = RenderPipeline::new(
+            &device,
+            &camera_bind_group_layout,
+            config.format,
+            MPM_PARTICLE_RADIUS,
         );
         let marching_cubes = MarchingCubes::new(&device);
         let mc_pipeline =
@@ -305,6 +321,7 @@ impl State {
             window,
             container_pipeline,
             fluid_pipeline,
+            mpm_pipeline,
             marching_cubes,
             mc_pipeline,
             camera,
@@ -314,6 +331,7 @@ impl State {
             camera_uniform,
             depth_texture,
             fluid_sim,
+            mpm_fluid_sim,
             screen_space_rendering,
         })
     }
@@ -368,6 +386,7 @@ impl State {
             });
 
         self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
+        self.mpm_fluid_sim.step(&self.device, &mut encoder);
 
         if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
             self.marching_cubes.extract(
@@ -425,6 +444,12 @@ impl State {
                         &self.camera_bind_group,
                         self.fluid_sim.particle_buffer(),
                         self.fluid_sim.num_particles(),
+                    );
+                    self.mpm_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        self.mpm_fluid_sim.particle_buffer(),
+                        self.mpm_fluid_sim.num_particles(),
                     );
                 }
                 FluidRenderMode::MarchingCubes => {

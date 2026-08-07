@@ -1,5 +1,6 @@
 use crate::graphics::{PipelineInfo, PipelineState, create_pipeline};
-use crate::physics::FluidParticle;
+use crate::physics::RenderParticle;
+use std::marker::PhantomData;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -100,24 +101,32 @@ fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
     (vertices, indices)
 }
 
-/// draw fluid particles as instanced cubes (boundary particles are culled in the shader)
-pub struct RenderPipeline {
-    fluid: PipelineState,
+/// draw particles as instanced cubes; 
+//  generic P provide instance layout + WGSL vertex fields (works for generic structs)
+pub struct RenderPipeline<P: RenderParticle> {
+    pipeline: PipelineState,
     mesh_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
+    _marker: PhantomData<P>,
 }
 
-impl RenderPipeline {
+impl<P: RenderParticle> RenderPipeline<P> {
     pub fn new(
         device: &wgpu::Device,
         global_bind_group_layout: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
         particle_radius: f32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
-        let vertex_buffers = [ParticleMeshVertex::layout(), FluidParticle::instance_layout()];
-        let fluid = create_pipeline(
+        let shader_src = include_str!("particle_render.wgsl")
+            .replace("${INSTANCE_FIELDS}", P::instance_wgsl_fields())
+            .replace("${VS_MAIN_BODY}", P::vs_main_body());
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("particle render"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(shader_src)),
+        });
+        let vertex_buffers = [ParticleMeshVertex::layout(), P::instance_layout()];
+        let pipeline = create_pipeline(
             device,
             &PipelineInfo {
                 shader: &shader,
@@ -147,10 +156,11 @@ impl RenderPipeline {
             usage: wgpu::BufferUsages::INDEX,
         });
         Self {
-            fluid,
+            pipeline,
             mesh_buffer,
             index_buffer,
             num_indices: indices.len() as u32,
+            _marker: PhantomData,
         }
     }
 
@@ -161,7 +171,7 @@ impl RenderPipeline {
         particle_buffer: &wgpu::Buffer,
         num_instances: u32,
     ) {
-        self.fluid.bind(render_pass, global_bind_group);
+        self.pipeline.bind(render_pass, global_bind_group);
         render_pass.set_vertex_buffer(0, self.mesh_buffer.slice(..));
         render_pass.set_vertex_buffer(1, particle_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);

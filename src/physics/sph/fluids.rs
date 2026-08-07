@@ -256,7 +256,7 @@ impl FluidSim {
             })
         });
         Self {
-            spatial_hash: SpatialHashGPU::new(device, num_particles),
+            spatial_hash: SpatialHashGPU::new::<FluidParticle>(device, num_particles),
             compute_densities: ComputeDensities::new(device),
             simulation: Simulation::new(device),
             particles: buffers,

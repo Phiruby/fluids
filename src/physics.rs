@@ -1,17 +1,26 @@
-mod sph;
+mod mpm;
 mod pipelines;
+mod sph;
 use nalgebra::Vector3;
 use std::ops::Add;
 
+pub use mpm::MpmFluidSim;
+pub(crate) use pipelines::PrefixSum;
 pub use sph::boundaries::ContainerBoundary;
 pub use sph::fluids::FluidSim;
-pub(crate) use pipelines::PrefixSum;
 
 pub const FLUID_COLOR: [f32; 3] = [0.2, 0.5, 0.95];
 
 pub trait GpuParticle {
     /// this should return fields as used in wgsl
     fn wgsl_fields() -> &'static str;
+}
+
+/// for particles that can be drawn with the instanced cube pipeline
+pub trait RenderParticle: GpuParticle {
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static>;
+    fn instance_wgsl_fields() -> &'static str;
+    fn vs_main_body() -> &'static str;
 }
 
 #[repr(C)]
@@ -46,10 +55,23 @@ impl Default for FluidParticle {
     }
 }
 
-impl FluidParticle {
-    /// layout for instanced-particle pipeline; can read particles straight
-    /// from the simulation buffer
-    pub fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+impl GpuParticle for FluidParticle {
+    fn wgsl_fields() -> &'static str {
+        r#"
+        position: vec3<f32>,
+        velocity: vec3<f32>,
+        normal: vec3<f32>,
+        density: f32,
+        rest_density: f32,
+        mass: f32,
+        cell_hash: u32,
+        boundary: u32,
+        "#
+    }
+}
+
+impl RenderParticle for FluidParticle {
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -73,6 +95,23 @@ impl FluidParticle {
         }
     }
 
+    fn instance_wgsl_fields() -> &'static str {
+        r#"
+        @location(2) instance_position: vec3<f32>,
+        @location(3) color: vec3<f32>,
+        @location(4) boundary: u32,
+        "#
+    }
+
+    fn vs_main_body() -> &'static str {
+        r#"
+        if input.boundary == 0u { return culled(); }
+        return particle_out(input, input.color, 1.0);
+        "#
+    }
+}
+
+impl FluidParticle {
     /// Just to pad the buffers
     pub fn inert() -> Self {
         Self {
@@ -84,6 +123,102 @@ impl FluidParticle {
             ..Default::default()
         }
     }
+}
+
+/// column major 3x3 (with 16 byte padding)
+pub type WgslMat3 = [[f32; 4]; 3];
+
+fn wgsl_mat3_identity() -> WgslMat3 {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ]
+}
+
+fn wgsl_mat3_zero() -> WgslMat3 {
+    [[0.0; 4]; 3]
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MpmFluidParticle {
+    pub deformation_gradient: WgslMat3,
+    pub b: WgslMat3,
+    pub position: [f32; 3],
+    _pad0: f32,
+    pub velocity: [f32; 3],
+    _pad1: f32,
+    pub rest_volume: f32,
+    pub mass: f32,
+    _pad2: [f32; 2],
+}
+
+impl Default for MpmFluidParticle {
+    fn default() -> Self {
+        Self {
+            deformation_gradient: wgsl_mat3_zero(),
+            b: wgsl_mat3_zero(),
+            position: [0.0; 3],
+            _pad0: 0.0,
+            velocity: [0.0; 3],
+            _pad1: 0.0,
+            rest_volume: 0.0,
+            mass: 0.0,
+            _pad2: [0.0; 2],
+        }
+    }
+}
+
+impl GpuParticle for MpmFluidParticle {
+    fn wgsl_fields() -> &'static str {
+        r#"
+        deformation_gradient: mat3x3<f32>,
+        B: mat3x3<f32>,
+        position: vec3<f32>,
+        velocity: vec3<f32>,
+        rest_volume: f32,
+        mass: f32,
+        "#
+    }
+}
+
+impl RenderParticle for MpmFluidParticle {
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[wgpu::VertexAttribute {
+                offset: std::mem::offset_of!(MpmFluidParticle, position) as wgpu::BufferAddress,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x3,
+            }],
+        }
+    }
+
+    fn instance_wgsl_fields() -> &'static str {
+        r#"
+        @location(2) instance_position: vec3<f32>,
+        "#
+    }
+
+    fn vs_main_body() -> &'static str {
+        r#"
+        return particle_out(input, vec3<f32>(0.2, 0.5, 0.95), 1.0);
+        "#
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MpmGridNode {
+    momentum_x: i32,
+    momentum_y: i32,
+    momentum_z: i32,
+    mass: i32,
+    force_x: i32,
+    force_y: i32,
+    force_z: i32,
 }
 
 /// n x n x n cube of fluid particles
@@ -109,6 +244,29 @@ pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidPart
     particles
 }
 
+pub fn mpm_fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<MpmFluidParticle> {
+    let rest_volume = spacing * spacing * spacing;
+    let mut particles = Vec::with_capacity(n * n * n);
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..n {
+                particles.push(MpmFluidParticle {
+                    deformation_gradient: wgsl_mat3_identity(),
+                    b: wgsl_mat3_zero(),
+                    position: [
+                        origin.x + i as f32 * spacing,
+                        origin.y + j as f32 * spacing,
+                        origin.z + k as f32 * spacing,
+                    ],
+                    rest_volume,
+                    mass: 1.0,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    particles
+}
 
 pub fn lattice_rest_density(spacing: f32, mass: f32, kernel: &CubicKernel) -> f32 {
     let reach = (kernel.h / spacing).ceil() as i32;
@@ -126,7 +284,7 @@ pub fn lattice_rest_density(spacing: f32, mass: f32, kernel: &CubicKernel) -> f3
 
 /// all particles given the same rest density (and initial density as well):
 /// helped stabilize sim since boundary fluid particles naturally are less densed,
-/// which was causing all sorts of problems 
+/// which was causing all sorts of problems
 pub fn assign_rest_densities(
     particles: &mut [FluidParticle],
     boundary_particles: &mut [FluidParticle],
@@ -191,7 +349,6 @@ impl CubicKernel {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

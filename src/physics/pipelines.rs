@@ -216,7 +216,13 @@ pub struct SpatialHashGPU {
 
 impl SpatialHashGPU {
     pub fn new<T: GpuParticle>(device: &wgpu::Device, max_particles: u32) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("spatial_hash.wgsl"));
+        let shader_string = include_str!("spatial_hash.wgsl");
+        let shader_string = shader_string.replace("${PARTICLE_FIELDS}", T::wgsl_fields());
+
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("spatial hash"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&shader_string)),
+        });
         // Explicit layout: auto layout from `build_hash_table` only sees 2 bindings.
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("spatial hash"),
@@ -437,7 +443,6 @@ impl SpatialHashGPU {
         pass.dispatch_workgroups(wgs as u32, 1, 1);
     }
 }
-
 
 #[cfg(test)]
 mod prefix_sum_test {
