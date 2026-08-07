@@ -1,11 +1,11 @@
-mod boundaries;
-mod fluids;
+mod sph;
+mod pipelines;
 use nalgebra::Vector3;
 use std::ops::Add;
 
-pub use boundaries::ContainerBoundary;
-pub use fluids::FluidSim;
-pub(crate) use fluids::PrefixSum;
+pub use sph::boundaries::ContainerBoundary;
+pub use sph::fluids::FluidSim;
+pub(crate) use pipelines::PrefixSum;
 
 pub const FLUID_COLOR: [f32; 3] = [0.2, 0.5, 0.95];
 
@@ -51,8 +51,8 @@ impl Default for FluidParticle {
 }
 
 impl FluidParticle {
-    /// Per-instance layout so the render pipeline can read particles straight
-    /// from the simulation buffer (position, `normal` as color, boundary flag).
+    /// layout for instanced-particle pipeline; can read particles straight
+    /// from the simulation buffer
     pub fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
