@@ -9,7 +9,7 @@ use crate::graphics::{
 };
 use crate::physics::{
     ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmFluidParticle, MpmFluidSim,
-    assign_rest_densities, fluid_cube, mpm_fluid_cube, mpm_grid_bounds,
+    assign_rest_densities, fluid_cube, mpm_collider_bounds, mpm_fluid_cube, mpm_grid_bounds,
 };
 use crate::texture::Texture;
 use std::sync::Arc;
@@ -56,9 +56,9 @@ const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
 
-const MPM_GRID_N: usize = 16;
-const MPM_SPACING: f32 = 0.02;
-const MPM_ORIGIN: [f32; 3] = [-0.9, 1.5, -0.9];
+const MPM_GRID_N: usize = 32;
+const MPM_SPACING: f32 = 0.01;
+const MPM_ORIGIN: [f32; 3] = [-0.55, 1.6, -0.55];
 const MPM_PARTICLE_RADIUS: f32 = 0.012;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
@@ -104,6 +104,7 @@ pub struct State {
     wireframe_pipeline: WireframeBoxPipeline,
     sph_wireframe: WireframeBox,
     mpm_wireframe: WireframeBox,
+    mpm_collider_wireframe: WireframeBox,
     fluid_pipeline: RenderPipeline<FluidParticle>,
     mpm_pipeline: RenderPipeline<MpmFluidParticle>,
     marching_cubes: MarchingCubes,
@@ -265,6 +266,9 @@ impl State {
             WireframeBox::new(&device, CONTAINER_MIN, CONTAINER_MAX, [0.25, 0.95, 0.35]);
         let (mpm_min, mpm_max) = mpm_grid_bounds();
         let mpm_wireframe = WireframeBox::new(&device, mpm_min, mpm_max, [0.95, 0.55, 0.2]);
+        let (col_min, col_max) = mpm_collider_bounds();
+        let mpm_collider_wireframe =
+            WireframeBox::new(&device, col_min, col_max, [0.35, 0.85, 1.0]);
 
         let mut fluid_particles =
             fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
@@ -331,6 +335,7 @@ impl State {
             wireframe_pipeline,
             sph_wireframe,
             mpm_wireframe,
+            mpm_collider_wireframe,
             fluid_pipeline,
             mpm_pipeline,
             marching_cubes,
@@ -496,12 +501,27 @@ impl State {
                 },
             }
 
-            let wireframe = match SIM_BACKEND {
-                SimBackend::Sph => &self.sph_wireframe,
-                SimBackend::Mpm => &self.mpm_wireframe,
-            };
-            self.wireframe_pipeline
-                .draw(&mut render_pass, &self.camera_bind_group, wireframe);
+            match SIM_BACKEND {
+                SimBackend::Sph => {
+                    self.wireframe_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        &self.sph_wireframe,
+                    );
+                }
+                SimBackend::Mpm => {
+                    self.wireframe_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        &self.mpm_wireframe,
+                    );
+                    self.wireframe_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        &self.mpm_collider_wireframe,
+                    );
+                }
+            }
         }
 
         self.queue.submit([encoder.finish()]);

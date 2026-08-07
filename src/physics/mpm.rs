@@ -1,8 +1,12 @@
+mod objects;
+
 use crate::physics::{MpmFluidParticle, MpmGridNode};
 use wgpu::util::DeviceExt;
 
+pub use objects::mpm_collider_bounds;
+
 pub const MPM_N: u32 = 64;
-pub const MPM_DX: f32 = 0.1;
+pub const MPM_DX: f32 = 0.02;
 pub const MPM_BOTTOM_LEFT: [f32; 3] = [-1.0, 1.0, -1.0];
 
 const N: u64 = MPM_N as u64;
@@ -111,6 +115,16 @@ impl P2G {
 struct GridSimulation {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    collider_buffer: wgpu::Buffer,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ColliderUniform {
+    min: [f32; 3],
+    _pad0: f32,
+    max: [f32; 3],
+    _pad1: f32,
 }
 
 impl GridSimulation {
@@ -118,16 +132,28 @@ impl GridSimulation {
         let module = device.create_shader_module(wgpu::include_wgsl!("mpm/grid_simulation.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("run simulation"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("simulation"),
@@ -142,7 +168,22 @@ impl GridSimulation {
             cache: Default::default(),
             compilation_options: Default::default(),
         });
-        Self { pipeline, layout }
+        let (min, max) = objects::mpm_collider_bounds();
+        let collider_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mpm collider"),
+            contents: bytemuck::bytes_of(&ColliderUniform {
+                min,
+                _pad0: 0.0,
+                max,
+                _pad1: 0.0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        Self {
+            pipeline,
+            layout,
+            collider_buffer,
+        }
     }
 
     pub fn compute(
@@ -154,10 +195,16 @@ impl GridSimulation {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("grid_sim"),
             layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: grid.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.collider_buffer.as_entire_binding(),
+                },
+            ],
         });
         // TODO: we should make subpass to filter nodes with 0 mass
         let n_nodes = (N * N * N) as u32;
@@ -310,9 +357,11 @@ mod mpm_step_tests {
 
     fn gpu() -> (wgpu::Device, wgpu::Queue) {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .expect("adapter");
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("device")
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("adapter");
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+            .expect("device")
     }
 
     #[test]
@@ -328,7 +377,8 @@ mod mpm_step_tests {
         sim.step(&device, &mut enc);
         queue.submit(Some(enc.finish()));
 
-        let after = dbg.read::<MpmFluidParticle>(&device, &queue, &sim.particles, particles.len() as u64);
+        let after =
+            dbg.read::<MpmFluidParticle>(&device, &queue, &sim.particles, particles.len() as u64);
         let grid = grid_dbg.read::<MpmGridNode>(&device, &queue, &sim.p2g.grid, (N * N * N) as u64);
         let nonzero_mass = grid.iter().filter(|n| n.mass > 0).count();
         let max_mass = grid.iter().map(|n| n.mass).max().unwrap_or(0);
@@ -340,11 +390,14 @@ mod mpm_step_tests {
         eprintln!("after[0].velocity={:?}", after[0].velocity);
         eprintln!("nonzero_mass_nodes={nonzero_mass} max_mass={max_mass}");
         eprintln!("max_force_y={max_force_y} max_mom_y={max_mom_y}");
-        eprintln!("pos delta={:?}", [
-            after[0].position[0] - before[0],
-            after[0].position[1] - before[1],
-            after[0].position[2] - before[2],
-        ]);
+        eprintln!(
+            "pos delta={:?}",
+            [
+                after[0].position[0] - before[0],
+                after[0].position[1] - before[1],
+                after[0].position[2] - before[2],
+            ]
+        );
 
         assert!(nonzero_mass > 0, "P2G deposited no mass");
         assert!(

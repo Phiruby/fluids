@@ -18,20 +18,20 @@ struct GridParticle {
     force_z: atomic<i32>,
 }
 
-const DX: f32 = 0.1;
+const DX: f32 = 0.02;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.0, 1.0, -1.0);
 const N: u32 = 64u;
-const FIXED_POINT_SCALE: f32 = 4096.0;
+const FIXED_POINT_SCALE: f32 = 9192.0;
 const D_INV = 3.0 / (DX * DX);
 const GAMMA = 7.0;
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> grid: array<GridParticle>;
 
-fn fluid_pressure(idx: u32) -> mat3x3<f32> {
+fn fluid_stress(idx: u32) -> mat3x3<f32> {
     let j: f32 = determinant(particles[idx].deformation_gradient);
-    let p = 10000.0 * (pow(j, -GAMMA) - 1.0);
-    return particles[idx].rest_volume * mat3x3<f32>(p, 0.0, 0.0, 0.0, p, 0.0, 0.0, 0.0, p);
+    let p = max(10000.0 * (pow(j, -GAMMA) - 1.0), 0.0);
+    return mat3x3<f32>(p, 0.0, 0.0, 0.0, p, 0.0, 0.0, 0.0, p);
 }
 fn quadratic_kernel(r: f32) -> f32 {
     let ar = abs(r);
@@ -81,8 +81,8 @@ fn particles_to_grid(@builtin(global_invocation_id) id: vec3<u32>) {
                 let total_velocity = v_p + affine_contribution;
                 let mass_contribution = weight * p.mass;
                 let momentum_contribution = mass_contribution * total_velocity;
-                let force_contribution = weight * p.rest_volume 
-                  * D_INV * fluid_pressure(id.x) * xi_xp
+                let force_contribution = weight * p.rest_volume
+                  * D_INV * fluid_stress(p_idx) * xi_xp
                   - weight * p.mass * vec3<f32>(0.0, 9.81, 0.0);
 
                 let linear_grid_idx = get_grid_index(vec3<u32>(current_coord));

@@ -18,10 +18,9 @@ struct GridParticle {
     force_z: i32,
 }
 
-const DX: f32 = 0.1;
+const DX: f32 = 0.02;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.0, 1.0, -1.0);
 const N: u32 = 64u;
-const FIXED_POINT_SCALE: f32 = 4096.0;
 const D_INV = 3.0 / (DX * DX);
 const GAMMA = 7.0;
 const DT = 0.001;
