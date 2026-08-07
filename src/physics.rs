@@ -9,13 +9,9 @@ pub(crate) use pipelines::PrefixSum;
 
 pub const FLUID_COLOR: [f32; 3] = [0.2, 0.5, 0.95];
 
-#[derive(Debug, Clone)]
-#[allow(unused)]
-pub struct PhysicsVertex {
-    pub position: Vector3<f32>,
-    pub velocity: Vector3<f32>,
-    pub renderable: bool,
-    pub mass: f32,
+pub trait GpuParticle {
+    /// this should return fields as used in wgsl
+    fn wgsl_fields() -> &'static str;
 }
 
 #[repr(C)]
@@ -196,26 +192,6 @@ impl CubicKernel {
     }
 }
 
-/// Eq (11) in https://arxiv.org/pdf/2009.06944
-pub fn compute_densities(
-    vertices: &[PhysicsVertex],
-    kernel: &CubicKernel,
-    neighbors: &[Vec<usize>],
-) -> Vec<f32> {
-    let mut densities = vec![0.0; vertices.len()];
-    for i in 0..vertices.len() {
-        let density = neighbor_sum(
-            |j| {
-                let r = vertices[i].position - vertices[j].position;
-                vertices[j].mass * kernel.weight(r.norm())
-            },
-            &neighbors[i],
-            0.0,
-        );
-        densities[i] = density;
-    }
-    densities
-}
 
 #[cfg(test)]
 mod tests {

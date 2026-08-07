@@ -1,5 +1,6 @@
 use crate::graphics::BufferDebug;
 use crate::physics::FluidParticle;
+use crate::physics::GpuParticle;
 use wgpu::util::DeviceExt;
 const WG_SIZE: u32 = 256;
 const RADIX_BUCKETS: u32 = 16;
@@ -214,7 +215,7 @@ pub struct SpatialHashGPU {
 }
 
 impl SpatialHashGPU {
-    pub fn new(device: &wgpu::Device, max_particles: u32) -> Self {
+    pub fn new<T: GpuParticle>(device: &wgpu::Device, max_particles: u32) -> Self {
         let module = device.create_shader_module(wgpu::include_wgsl!("spatial_hash.wgsl"));
         // Explicit layout: auto layout from `build_hash_table` only sees 2 bindings.
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
