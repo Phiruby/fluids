@@ -17,11 +17,10 @@ struct GridParticle {
     force_z: i32,
 }
 
-const DX: f32 = 0.01;
-const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.0, 1.0, -1.0);
-const N: u32 = 128u;
+const DX: f32 = 0.02;
+const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
+const N: u32 = 64u;
 const D_INV = 4.0 / (DX * DX);
-const GAMMA = 7.0;
 const DT = 0.0001;
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
@@ -38,8 +37,8 @@ fn quadratic_kernel(r: f32) -> f32 {
     return 0.0;
 }
 
-fn get_grid_index(coord: vec3<u32>) -> u32 {
-    return coord.x * N * N + coord.y * N + coord.z;
+fn get_grid_index(coord: vec2<u32>) -> u32 {
+    return coord.x * N + coord.y;
 }
 
 fn outer(v1: vec3<f32>, v2: vec3<f32>) -> mat3x3<f32> {
@@ -53,9 +52,8 @@ fn grid_to_particles(@builtin(global_invocation_id) id: vec3<u32>) {
     if p_idx >= arrayLength(&particles) { return; }
     var p = particles[p_idx];
 
-    let relative_pos = p.position - BOTTOM_LEFT;
-    let base_coord_f = relative_pos / DX;
-    let base_coord = vec3<i32>(floor(base_coord_f - 0.5));
+    let relative = (p.position.xy - BOTTOM_LEFT.xy) / DX;
+    let base_coord = vec2<i32>(floor(relative - 0.5));
 
     var new_v = vec3<f32>(0.0);
     var new_B = mat3x3<f32>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -63,50 +61,51 @@ fn grid_to_particles(@builtin(global_invocation_id) id: vec3<u32>) {
 
     for (var i = 0; i < 3; i++) {
         for (var j = 0; j < 3; j++) {
-            for (var k = 0; k < 3; k++) {
-                let cell_offset = vec3<i32>(i, j, k);
-                let current_coord = base_coord + cell_offset;
-
-                if current_coord.x < 0 || current_coord.x >= i32(N) ||
-                    current_coord.y < 0 || current_coord.y >= i32(N) ||
-                    current_coord.z < 0 || current_coord.z >= i32(N) {
-                    continue;
-                }
-                let node_pos = BOTTOM_LEFT + vec3<f32>(current_coord) * DX;
-                let xi_xp = node_pos - p.position;
-                let r = xi_xp / DX;
-                let weight = quadratic_kernel(r.x) * quadratic_kernel(r.y) * quadratic_kernel(r.z);
-                let linear_grid_idx = get_grid_index(vec3<u32>(current_coord));
-
-                if grid[linear_grid_idx].mass <= 0 { continue; }
-                // no need to rescale by 1/FIXED_POINT_SCALE since dividing by mass cancels it out
-                let vi = vec3<f32>(
-                    f32(grid[linear_grid_idx].momentum_x),
-                    f32(grid[linear_grid_idx].momentum_y),
-                    f32(grid[linear_grid_idx].momentum_z),
-                ) / f32(grid[linear_grid_idx].mass);
-                new_v += vi * weight;
-                new_B += weight * outer(vi, xi_xp);
-                let increment_pos = node_pos + vi * DT;
-                new_pos += increment_pos * weight;
+            let current_coord = base_coord + vec2<i32>(i, j);
+            if current_coord.x < 0 || current_coord.x >= i32(N) ||
+                current_coord.y < 0 || current_coord.y >= i32(N) {
+                continue;
             }
+            let node_pos = vec3<f32>(
+                BOTTOM_LEFT.x + f32(current_coord.x) * DX,
+                BOTTOM_LEFT.y + f32(current_coord.y) * DX,
+                0.0,
+            );
+            let xi_xp = node_pos - vec3<f32>(p.position.xy, 0.0);
+            let r = xi_xp.xy / DX;
+            let weight = quadratic_kernel(r.x) * quadratic_kernel(r.y);
+            let idx = get_grid_index(vec2<u32>(current_coord));
+
+            if grid[idx].mass <= 0 { continue; }
+            let vi = vec3<f32>(
+                f32(grid[idx].momentum_x),
+                f32(grid[idx].momentum_y),
+                0.0,
+            ) / f32(grid[idx].mass);
+            new_v += vi * weight;
+            new_B += weight * outer(vi, xi_xp);
+            new_pos += (node_pos + vi * DT) * weight;
         }
     }
-    p.velocity = new_v;
+
+    p.velocity = vec3<f32>(new_v.xy, 0.0);
     p.B = new_B;
     // eq (17)
     let C = D_INV * p.B;
-    var j = determinant(p.deformation_gradient);
-    j *= 1.0 + DT * (C[0][0] + C[1][1] + C[2][2]);
+    var j = p.deformation_gradient[0][0] * p.deformation_gradient[1][1]
+        - p.deformation_gradient[0][1] * p.deformation_gradient[1][0];
+    j *= 1.0 + DT * (C[0][0] + C[1][1]);
     j = max(j, 0.1);
-    let s = pow(j, 1.0 / 3.0);
+    let s = sqrt(j);
     p.deformation_gradient = mat3x3<f32>(
         s, 0.0, 0.0,
         0.0, s, 0.0,
-        0.0, 0.0, s,
+        0.0, 0.0, 1.0,
     );
-    // p.position += p.velocity * DT;
-    // this is equivalent to p.position += p.velocity * DT (quadratic B spline has partition of unity)
-    p.position = new_pos;
+    p.position = vec3<f32>(
+        clamp(new_pos.x, DX, f32(N - 2) * DX),
+        clamp(new_pos.y, DX, f32(N - 2) * DX),
+        0.0,
+    );
     particles[p_idx] = p;
 }

@@ -198,7 +198,9 @@ impl RenderParticle for MpmFluidParticle {
 
     fn vs_main_body() -> &'static str {
         r#"
-        return particle_out(input, vec3<f32>(0.2, 0.5, 0.95), 1.0);
+        var out = particle_out(input, vec3<f32>(1.0, 1.0, 1.0), 1.0);
+        out.world_normal = vec3<f32>(0.0);
+        return out;
         "#
     }
 }
@@ -239,26 +241,34 @@ pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidPart
 }
 
 pub fn mpm_fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<MpmFluidParticle> {
-    let rest_volume = spacing * spacing * spacing;
+    mpm_fluid_block(n, n, spacing, origin)
+}
+
+/// nx × ny block of fluid particles in the XY plane (z unused / pinned to origin.z).
+pub fn mpm_fluid_block(
+    nx: usize,
+    ny: usize,
+    spacing: f32,
+    origin: Vector3<f32>,
+) -> Vec<MpmFluidParticle> {
+    let rest_volume = spacing * spacing;
     let density = 1000.0;
     let mass = density * rest_volume;
-    let mut particles = Vec::with_capacity(n * n * n);
-    for i in 0..n {
-        for j in 0..n {
-            for k in 0..n {
-                particles.push(MpmFluidParticle {
-                    deformation_gradient: wgsl_mat3_identity(),
-                    b: [[0.0; 4]; 3],
-                    position: [
-                        origin.x + i as f32 * spacing,
-                        origin.y + j as f32 * spacing,
-                        origin.z + k as f32 * spacing,
-                    ],
-                    rest_volume,
-                    mass,
-                    ..Default::default()
-                });
-            }
+    let mut particles = Vec::with_capacity(nx * ny);
+    for i in 0..nx {
+        for j in 0..ny {
+            particles.push(MpmFluidParticle {
+                deformation_gradient: wgsl_mat3_identity(),
+                b: [[0.0; 4]; 3],
+                position: [
+                    origin.x + i as f32 * spacing,
+                    origin.y + j as f32 * spacing,
+                    origin.z,
+                ],
+                rest_volume,
+                mass,
+                ..Default::default()
+            });
         }
     }
     particles

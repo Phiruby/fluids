@@ -9,7 +9,7 @@ use crate::graphics::{
 };
 use crate::physics::{
     ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmFluidParticle, MpmFluidSim,
-    assign_rest_densities, fluid_cube, mpm_collider_bounds, mpm_fluid_cube, mpm_grid_bounds,
+    assign_rest_densities, fluid_cube, mpm_collider_bounds, mpm_fluid_block, mpm_grid_bounds,
 };
 use crate::texture::Texture;
 use std::sync::Arc;
@@ -56,10 +56,11 @@ const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
 
-const MPM_GRID_N: usize = 32;
-const MPM_SPACING: f32 = 0.01;
-const MPM_ORIGIN: [f32; 3] = [-0.55, 1.6, -0.55];
-const MPM_PARTICLE_RADIUS: f32 = 0.012;
+const MPM_BLOCK_NX: usize = 20;
+const MPM_BLOCK_NY: usize = 20;
+const MPM_SPACING: f32 = 0.02;
+const MPM_ORIGIN: [f32; 3] = [0.35, 0.70, 0.0];
+const MPM_PARTICLE_RADIUS: f32 = 0.006;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
 const CONTAINER_MAX: [f32; 3] = [0.1, 1.85, 0.8];
@@ -80,13 +81,25 @@ pub(crate) struct Camera {
     fovy: f32,
     znear: f32,
     zfar: f32,
+    /// use orthographic projection (for 2D MPM)
+    ortho_half_extent: Option<f32>,
 }
 impl Camera {
     fn build_view_projection_matrix(&self) -> (cgmath::Matrix4<f32>, cgmath::Matrix4<f32>) {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
-        let projection =
-            cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
-        return (OPENGL_TO_WGPU_MATRIX * projection, view);
+        let projection = if let Some(half) = self.ortho_half_extent {
+            let (half_x, half_y) = if self.aspect >= 1.0 {
+                (half * self.aspect, half)
+            } else {
+                (half, half / self.aspect)
+            };
+            OPENGL_TO_WGPU_MATRIX
+                * cgmath::ortho(-half_x, half_x, -half_y, half_y, self.znear, self.zfar)
+        } else {
+            OPENGL_TO_WGPU_MATRIX
+                * cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar)
+        };
+        (projection, view)
     }
     fn focal_lengths(&self) -> (f32, f32) {
         let focal_y = 1.0 / (self.fovy.to_radians() * 0.5).tan();
@@ -216,14 +229,36 @@ impl State {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        let camera = Camera {
-            eye: (-0.4, 1.4, 3.2).into(),
-            target: (-0.55, 0.55, -0.1).into(),
-            up: (0.0, 1.0, 0.0).into(),
-            aspect: config.width as f32 / config.height as f32,
-            fovy: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
+        let (mpm_min, mpm_max) = mpm_grid_bounds();
+        let mpm_center = [
+            0.5 * (mpm_min[0] + mpm_max[0]),
+            0.5 * (mpm_min[1] + mpm_max[1]),
+            0.0,
+        ];
+        let mpm_half_extent = 0.5 * (mpm_max[0] - mpm_min[0]) + 0.06;
+
+        let camera = if SIM_BACKEND == SimBackend::Mpm {
+            Camera {
+                eye: (mpm_center[0], mpm_center[1], 3.0).into(),
+                target: (mpm_center[0], mpm_center[1], 0.0).into(),
+                up: (0.0, 1.0, 0.0).into(),
+                aspect: config.width as f32 / config.height as f32,
+                fovy: 45.0,
+                znear: 0.1,
+                zfar: 100.0,
+                ortho_half_extent: Some(mpm_half_extent),
+            }
+        } else {
+            Camera {
+                eye: (-0.4, 1.4, 3.2).into(),
+                target: (-0.55, 0.55, -0.1).into(),
+                up: (0.0, 1.0, 0.0).into(),
+                aspect: config.width as f32 / config.height as f32,
+                fovy: 45.0,
+                znear: 0.1,
+                zfar: 100.0,
+                ortho_half_extent: None,
+            }
         };
 
         let mut camera_uniform = CameraUniform::new();
@@ -295,7 +330,12 @@ impl State {
         fluid_particles.resize(padded_len, FluidParticle::inert());
 
         let fluid_sim = FluidSim::new(&device, &fluid_particles);
-        let mpm_particles = mpm_fluid_cube(MPM_GRID_N, MPM_SPACING, Vector3::from(MPM_ORIGIN));
+        let mpm_particles = mpm_fluid_block(
+            MPM_BLOCK_NX,
+            MPM_BLOCK_NY,
+            MPM_SPACING,
+            Vector3::from(MPM_ORIGIN),
+        );
         let mpm_fluid_sim = MpmFluidSim::new(&device, &mpm_particles);
         let fluid_pipeline = RenderPipeline::new(
             &device,
@@ -439,11 +479,20 @@ impl State {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
+                        load: wgpu::LoadOp::Clear(if SIM_BACKEND == SimBackend::Mpm {
+                            wgpu::Color {
+                                r: 0.18,
+                                g: 0.49,
+                                b: 0.42,
+                                a: 1.0,
+                            }
+                        } else {
+                            wgpu::Color {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            }
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -510,16 +559,6 @@ impl State {
                     );
                 }
                 SimBackend::Mpm => {
-                    self.wireframe_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        &self.mpm_wireframe,
-                    );
-                    self.wireframe_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        &self.mpm_collider_wireframe,
-                    );
                 }
             }
         }

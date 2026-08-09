@@ -5,9 +5,9 @@ use wgpu::util::DeviceExt;
 
 pub use objects::mpm_collider_bounds;
 
-pub const MPM_N: u32 = 128;
-pub const MPM_DX: f32 = 0.01;
-pub const MPM_BOTTOM_LEFT: [f32; 3] = [-1.0, 1.0, -1.0];
+pub const MPM_N: u32 = 64;
+pub const MPM_DX: f32 = 0.02;
+pub const MPM_BOTTOM_LEFT: [f32; 3] = [0.0, 0.0, 0.0];
 
 const N: u64 = MPM_N as u64;
 const WG_SIZE: u32 = 256;
@@ -15,7 +15,7 @@ const WG_SIZE: u32 = 256;
 pub fn mpm_grid_bounds() -> ([f32; 3], [f32; 3]) {
     let min = MPM_BOTTOM_LEFT;
     let extent = MPM_N as f32 * MPM_DX;
-    let max = [min[0] + extent, min[1] + extent, min[2] + extent];
+    let max = [min[0] + extent, min[1] + extent, min[2] + MPM_DX];
     (min, max)
 }
 
@@ -69,7 +69,7 @@ impl P2G {
         });
         let grid = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mpm grid"),
-            size: size_of::<MpmGridNode>() as u64 * N * N * N,
+            size: size_of::<MpmGridNode>() as u64 * N * N,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -206,8 +206,7 @@ impl GridSimulation {
                 },
             ],
         });
-        // TODO: we should make subpass to filter nodes with 0 mass
-        let n_nodes = (N * N * N) as u32;
+        let n_nodes = (N * N) as u32;
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
@@ -355,7 +354,7 @@ impl MpmFluidSim {
 mod mpm_step_tests {
     use super::*;
     use crate::graphics::BufferDebug;
-    use crate::physics::mpm_fluid_cube;
+    use crate::physics::mpm_fluid_block;
     use nalgebra::Vector3;
 
     fn gpu() -> (wgpu::Device, wgpu::Queue) {
@@ -370,7 +369,7 @@ mod mpm_step_tests {
     #[test]
     fn particles_move_after_step() {
         let (device, queue) = gpu();
-        let particles = mpm_fluid_cube(4, 0.02, Vector3::new(-0.9, 1.1, -0.9));
+        let particles = mpm_fluid_block(8, 8, 0.02, Vector3::new(0.2, 0.6, 0.0));
         let before = particles[0].position;
         let sim = MpmFluidSim::new(&device, &particles);
         let dbg = BufferDebug::new(&device, sim.particles.size());
@@ -382,30 +381,14 @@ mod mpm_step_tests {
 
         let after =
             dbg.read::<MpmFluidParticle>(&device, &queue, &sim.particles, particles.len() as u64);
-        let grid = grid_dbg.read::<MpmGridNode>(&device, &queue, &sim.p2g.grid, (N * N * N) as u64);
+        let grid = grid_dbg.read::<MpmGridNode>(&device, &queue, &sim.p2g.grid, (N * N) as u64);
         let nonzero_mass = grid.iter().filter(|n| n.mass > 0).count();
-        let max_mass = grid.iter().map(|n| n.mass).max().unwrap_or(0);
-        let max_force_y = grid.iter().map(|n| n.force_y).max().unwrap_or(0);
-        let max_mom_y = grid.iter().map(|n| n.momentum_y).max().unwrap_or(0);
-
-        eprintln!("before={before:?}");
-        eprintln!("after[0]={:?}", after[0].position);
-        eprintln!("after[0].velocity={:?}", after[0].velocity);
-        eprintln!("nonzero_mass_nodes={nonzero_mass} max_mass={max_mass}");
-        eprintln!("max_force_y={max_force_y} max_mom_y={max_mom_y}");
-        eprintln!(
-            "pos delta={:?}",
-            [
-                after[0].position[0] - before[0],
-                after[0].position[1] - before[1],
-                after[0].position[2] - before[2],
-            ]
-        );
 
         assert!(nonzero_mass > 0, "P2G deposited no mass");
         assert!(
             after[0].position != before || after[0].velocity != [0.0; 3],
             "particle did not move or gain velocity"
         );
+        assert_eq!(after[0].position[2], 0.0, "2D sim should keep z=0");
     }
 }

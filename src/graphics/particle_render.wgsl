@@ -53,6 +53,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let lighting = compute_lighting(in.world_normal);
+    // zero normal ⇒ unlit (used for flat 2D MPM points)
+    let lighting = select(1.0, compute_lighting(in.world_normal), length(in.world_normal) > 1e-5);
     return vec4<f32>(in.color * lighting, in.alpha);
 }
