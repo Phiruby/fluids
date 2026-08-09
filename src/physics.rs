@@ -240,6 +240,8 @@ pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidPart
 
 pub fn mpm_fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<MpmFluidParticle> {
     let rest_volume = spacing * spacing * spacing;
+    let density = 1000.0;
+    let mass = density * rest_volume;
     let mut particles = Vec::with_capacity(n * n * n);
     for i in 0..n {
         for j in 0..n {
@@ -253,7 +255,7 @@ pub fn mpm_fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<MpmFl
                         origin.z + k as f32 * spacing,
                     ],
                     rest_volume,
-                    mass: 1.0,
+                    mass,
                     ..Default::default()
                 });
             }

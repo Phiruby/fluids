@@ -1,4 +1,3 @@
-
 struct Particle {
     deformation_gradient: mat3x3<f32>,
     B: mat3x3<f32>,
@@ -18,12 +17,12 @@ struct GridParticle {
     force_z: i32,
 }
 
-const DX: f32 = 0.02;
+const DX: f32 = 0.01;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.0, 1.0, -1.0);
-const N: u32 = 64u;
-const D_INV = 3.0 / (DX * DX);
+const N: u32 = 128u;
+const D_INV = 4.0 / (DX * DX);
 const GAMMA = 7.0;
-const DT = 0.001;
+const DT = 0.0001;
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> grid: array<GridParticle>;
@@ -44,11 +43,7 @@ fn get_grid_index(coord: vec3<u32>) -> u32 {
 }
 
 fn outer(v1: vec3<f32>, v2: vec3<f32>) -> mat3x3<f32> {
-    return mat3x3<f32>(
-        v1.x * v2.x, v1.x * v2.y, v1.x * v2.z,
-        v1.y * v2.x, v1.y * v2.y, v1.y * v2.z,
-        v1.z * v2.x, v1.z * v2.y, v1.z * v2.z,
-    );
+    return mat3x3<f32>(v1 * v2.x, v1 * v2.y, v1 * v2.z);
 }
 
 @compute
@@ -101,8 +96,15 @@ fn grid_to_particles(@builtin(global_invocation_id) id: vec3<u32>) {
     p.B = new_B;
     // eq (17)
     let C = D_INV * p.B;
-    let identity = mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
-    p.deformation_gradient = (identity + DT * C) * p.deformation_gradient;
+    var j = determinant(p.deformation_gradient);
+    j *= 1.0 + DT * (C[0][0] + C[1][1] + C[2][2]);
+    j = max(j, 0.1);
+    let s = pow(j, 1.0 / 3.0);
+    p.deformation_gradient = mat3x3<f32>(
+        s, 0.0, 0.0,
+        0.0, s, 0.0,
+        0.0, 0.0, s,
+    );
     // p.position += p.velocity * DT;
     // this is equivalent to p.position += p.velocity * DT (quadratic B spline has partition of unity)
     p.position = new_pos;

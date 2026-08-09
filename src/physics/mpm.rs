@@ -5,8 +5,8 @@ use wgpu::util::DeviceExt;
 
 pub use objects::mpm_collider_bounds;
 
-pub const MPM_N: u32 = 64;
-pub const MPM_DX: f32 = 0.02;
+pub const MPM_N: u32 = 128;
+pub const MPM_DX: f32 = 0.01;
 pub const MPM_BOTTOM_LEFT: [f32; 3] = [-1.0, 1.0, -1.0];
 
 const N: u64 = MPM_N as u64;
@@ -326,17 +326,20 @@ impl MpmFluidSim {
         if self.num_particles == 0 {
             return;
         }
-        self.p2g
-            .compute(device, encoder, &self.particles, self.num_particles);
-        self.grid_simulation
-            .compute(device, encoder, &self.p2g.grid);
-        self.g2p.compute(
-            device,
-            encoder,
-            &self.particles,
-            &self.p2g.grid,
-            self.num_particles,
-        );
+        const SUBSTEPS: u32 = 8;
+        for _ in 0..SUBSTEPS {
+            self.p2g
+                .compute(device, encoder, &self.particles, self.num_particles);
+            self.grid_simulation
+                .compute(device, encoder, &self.p2g.grid);
+            self.g2p.compute(
+                device,
+                encoder,
+                &self.particles,
+                &self.p2g.grid,
+                self.num_particles,
+            );
+        }
     }
 
     pub fn particle_buffer(&self) -> &wgpu::Buffer {

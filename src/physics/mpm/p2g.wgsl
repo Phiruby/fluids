@@ -18,20 +18,22 @@ struct GridParticle {
     force_z: atomic<i32>,
 }
 
-const DX: f32 = 0.02;
+const DX: f32 = 0.01;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.0, 1.0, -1.0);
-const N: u32 = 64u;
-const FIXED_POINT_SCALE: f32 = 9192.0;
-const D_INV = 3.0 / (DX * DX);
+const N: u32 = 128u;
+const FIXED_POINT_SCALE: f32 = 1e8;
+const D_INV = 4.0 / (DX * DX);
 const GAMMA = 7.0;
+const K = 10000.0;
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> grid: array<GridParticle>;
 
 fn fluid_stress(idx: u32) -> mat3x3<f32> {
     let j: f32 = determinant(particles[idx].deformation_gradient);
-    let p = max(10000.0 * (pow(j, -GAMMA) - 1.0), 0.0);
-    return mat3x3<f32>(p, 0.0, 0.0, 0.0, p, 0.0, 0.0, 0.0, p);
+    let p = K * (pow(j, -GAMMA) - 1.0);
+    let s = j * p;
+    return mat3x3<f32>(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, s);
 }
 fn quadratic_kernel(r: f32) -> f32 {
     let ar = abs(r);
@@ -89,13 +91,13 @@ fn particles_to_grid(@builtin(global_invocation_id) id: vec3<u32>) {
 
                 // TODO: would using atomics be faster than using spatial hash
                 // and performing P2G per grid node?
-                atomicAdd(&grid[linear_grid_idx].mass, i32(mass_contribution * FIXED_POINT_SCALE));
-                atomicAdd(&grid[linear_grid_idx].momentum_x, i32(momentum_contribution.x * FIXED_POINT_SCALE));
-                atomicAdd(&grid[linear_grid_idx].momentum_y, i32(momentum_contribution.y * FIXED_POINT_SCALE));
-                atomicAdd(&grid[linear_grid_idx].momentum_z, i32(momentum_contribution.z * FIXED_POINT_SCALE));
-                atomicAdd(&grid[linear_grid_idx].force_x, i32(force_contribution.x * FIXED_POINT_SCALE));
-                atomicAdd(&grid[linear_grid_idx].force_y, i32(force_contribution.y * FIXED_POINT_SCALE));
-                atomicAdd(&grid[linear_grid_idx].force_z, i32(force_contribution.z * FIXED_POINT_SCALE));
+                atomicAdd(&grid[linear_grid_idx].mass, i32(round(mass_contribution * FIXED_POINT_SCALE)));
+                atomicAdd(&grid[linear_grid_idx].momentum_x, i32(round(momentum_contribution.x * FIXED_POINT_SCALE)));
+                atomicAdd(&grid[linear_grid_idx].momentum_y, i32(round(momentum_contribution.y * FIXED_POINT_SCALE)));
+                atomicAdd(&grid[linear_grid_idx].momentum_z, i32(round(momentum_contribution.z * FIXED_POINT_SCALE)));
+                atomicAdd(&grid[linear_grid_idx].force_x, i32(round(force_contribution.x * FIXED_POINT_SCALE)));
+                atomicAdd(&grid[linear_grid_idx].force_y, i32(round(force_contribution.y * FIXED_POINT_SCALE)));
+                atomicAdd(&grid[linear_grid_idx].force_z, i32(round(force_contribution.z * FIXED_POINT_SCALE)));
             }
         }
     }

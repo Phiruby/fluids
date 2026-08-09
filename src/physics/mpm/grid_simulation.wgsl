@@ -13,12 +13,11 @@ struct ColliderUniform {
     max: vec3<f32>,
 }
 
-const DX: f32 = 0.02;
+const DX: f32 = 0.01;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(-1.0, 1.0, -1.0);
-const N: u32 = 64u;
-const D_INV = 3.0 / (DX * DX);
-const GAMMA = 7.0;
-const DT = 0.001;
+const N: u32 = 128u;
+const D_INV = 4.0 / (DX * DX);
+const DT = 0.0001;
 
 @group(0) @binding(0) var<storage, read_write> grid: array<GridParticle>;
 @group(0) @binding(1) var<uniform> collider: ColliderUniform;
@@ -81,7 +80,7 @@ fn update_momentum(@builtin(global_invocation_id) gid: vec3<u32>) {
     v = collide_velocity(node_pos, v);
     mom = v * mass;
 
-    grid[idx].momentum_x = i32(mom.x);
-    grid[idx].momentum_y = i32(mom.y);
-    grid[idx].momentum_z = i32(mom.z);
+    grid[idx].momentum_x = i32(round(mom.x));
+    grid[idx].momentum_y = i32(round(mom.y));
+    grid[idx].momentum_z = i32(round(mom.z));
 }

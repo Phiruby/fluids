@@ -205,7 +205,6 @@ pub struct SpatialHashGPU {
     reset_hash_offsets: wgpu::ComputePipeline,
     hash_offsets: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
-    /// One uniform buffer per radix pass (avoids overwrite-before-submit).
     uniforms: [wgpu::Buffer; RADIX_PASSES],
     histogram_buf: wgpu::Buffer,
     pub(in crate::physics) hash_offsets_buf: wgpu::Buffer,
