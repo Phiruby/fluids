@@ -58,7 +58,7 @@ const ISO_LEVEL_STEP: f32 = 100.0;
 
 const MPM_BLOCK_NX: usize = 40;
 const MPM_BLOCK_NY: usize = 40;
-const MPM_SPACING: f32 = 0.01;
+const MPM_SPACING: f32 = 0.015;
 const MPM_ORIGIN: [f32; 3] = [0.35, 0.70, 0.0];
 const MPM_PARTICLE_RADIUS: f32 = 0.006;
 

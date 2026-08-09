@@ -84,7 +84,14 @@ fn fluid_stress(idx: u32) -> mat3x3<f32> {
     let j = f[0][0] * f[1][1] - f[0][1] * f[1][0];
     let p = max(-0.1, K * (pow(j, -GAMMA) - 1.0));
     let s = j * p;
-    return mat3x3<f32>(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0);
+
+    let velocity_gradient = D_INV * particles[idx].B;
+    var strain: mat3x3<f32> = velocity_gradient;
+    // 2d for now. will add z once we transition to 3d
+    let tr = strain[0][0] + strain[1][1];
+    strain[0][1] = tr;
+    strain[1][0] = tr;
+    return mat3x3<f32>(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0) + 0.5 * strain;
 }
 
 fn quadratic_kernel(r: f32) -> f32 {
