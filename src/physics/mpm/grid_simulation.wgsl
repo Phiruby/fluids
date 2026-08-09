@@ -1,11 +1,11 @@
 struct GridParticle {
-    momentum_x: i32,
-    momentum_y: i32,
-    momentum_z: i32,
-    mass: i32,
-    force_x: i32,
-    force_y: i32,
-    force_z: i32,
+    momentum_x: f32,
+    momentum_y: f32,
+    momentum_z: f32,
+    mass: f32,
+    force_x: f32,
+    force_y: f32,
+    force_z: f32,
 }
 
 struct ColliderUniform {
@@ -87,7 +87,7 @@ fn update_momentum(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     v = collide_velocity(node_pos, v);
     mom = v * mass;
-    grid[idx].momentum_x = i32(round(mom.x));
-    grid[idx].momentum_y = i32(round(mom.y));
+    grid[idx].momentum_x = mom.x;
+    grid[idx].momentum_y = mom.y;
     grid[idx].momentum_z = 0;
 }

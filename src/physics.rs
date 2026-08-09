@@ -208,13 +208,13 @@ impl RenderParticle for MpmFluidParticle {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MpmGridNode {
-    momentum_x: i32,
-    momentum_y: i32,
-    momentum_z: i32,
-    mass: i32,
-    force_x: i32,
-    force_y: i32,
-    force_z: i32,
+    momentum_x: f32,
+    momentum_y: f32,
+    momentum_z: f32,
+    mass: f32,
+    force_x: f32,
+    force_y: f32,
+    force_z: f32,
 }
 
 /// n x n x n cube of fluid particles

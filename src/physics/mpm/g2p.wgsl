@@ -8,13 +8,13 @@ struct Particle {
 }
 
 struct GridParticle {
-    momentum_x: i32,
-    momentum_y: i32,
-    momentum_z: i32,
-    mass: i32,
-    force_x: i32,
-    force_y: i32,
-    force_z: i32,
+    momentum_x: f32,
+    momentum_y: f32,
+    momentum_z: f32,
+    mass: f32,
+    force_x: f32,
+    force_y: f32,
+    force_z: f32,
 }
 
 const DX: f32 = 0.02;

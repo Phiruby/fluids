@@ -56,9 +56,9 @@ const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
 
-const MPM_BLOCK_NX: usize = 20;
-const MPM_BLOCK_NY: usize = 20;
-const MPM_SPACING: f32 = 0.02;
+const MPM_BLOCK_NX: usize = 40;
+const MPM_BLOCK_NY: usize = 40;
+const MPM_SPACING: f32 = 0.01;
 const MPM_ORIGIN: [f32; 3] = [0.35, 0.70, 0.0];
 const MPM_PARTICLE_RADIUS: f32 = 0.006;
 
@@ -188,7 +188,7 @@ impl State {
                 force_fallback_adapter: false,
             })
             .await?;
-
+        
         let device_limits = adapter.limits();
 
         #[cfg(not(target_arch = "wasm32"))]

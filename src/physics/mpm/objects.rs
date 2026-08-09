@@ -6,7 +6,7 @@ pub struct StationaryBox {
 }
 
 
-const WALL_MARGIN: f32 = 3.0 * MPM_DX;
+const WALL_MARGIN: f32 = 2.0 * MPM_DX;
 
 fn grid_node_max_xy() -> [f32; 2] {
     let e = (MPM_N - 1) as f32 * MPM_DX;

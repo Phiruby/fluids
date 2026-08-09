@@ -8,25 +8,76 @@ struct Particle {
 }
 
 struct GridParticle {
-    momentum_x: atomic<i32>,
-    momentum_y: atomic<i32>,
-    momentum_z: atomic<i32>,
-    mass: atomic<i32>,
-    force_x: atomic<i32>,
-    force_y: atomic<i32>,
-    force_z: atomic<i32>,
+    /// all the atomic<u32> are treated as f32 in the bit level.
+    /// my machine doesn't support atomic<f32> extension for vulkan, so doing this
+    momentum_x: atomic<u32>,
+    momentum_y: atomic<u32>,
+    momentum_z: atomic<u32>,
+    mass: atomic<u32>,
+    force_x: atomic<u32>,
+    force_y: atomic<u32>,
+    force_z: atomic<u32>,
 }
 
 const DX: f32 = 0.02;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const N: u32 = 64u;
-const FIXED_POINT_SCALE: f32 = 1e8;
 const D_INV = 4.0 / (DX * DX);
 const GAMMA = 7.0;
 const K = 10000.0;
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> grid: array<GridParticle>;
+
+fn atomic_add_mass(idx: u32, value: f32) {
+    var old_bits = atomicLoad(&grid[idx].mass);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + value);
+        let result = atomicCompareExchangeWeak(&grid[idx].mass, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+}
+
+fn atomic_add_momentum_x(idx: u32, value: f32) {
+    var old_bits = atomicLoad(&grid[idx].momentum_x);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + value);
+        let result = atomicCompareExchangeWeak(&grid[idx].momentum_x, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+}
+
+fn atomic_add_momentum_y(idx: u32, value: f32) {
+    var old_bits = atomicLoad(&grid[idx].momentum_y);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + value);
+        let result = atomicCompareExchangeWeak(&grid[idx].momentum_y, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+}
+
+fn atomic_add_force_x(idx: u32, value: f32) {
+    var old_bits = atomicLoad(&grid[idx].force_x);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + value);
+        let result = atomicCompareExchangeWeak(&grid[idx].force_x, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+}
+
+fn atomic_add_force_y(idx: u32, value: f32) {
+    var old_bits = atomicLoad(&grid[idx].force_y);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + value);
+        let result = atomicCompareExchangeWeak(&grid[idx].force_y, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+}
 
 fn fluid_stress(idx: u32) -> mat3x3<f32> {
     let f = particles[idx].deformation_gradient;
@@ -86,11 +137,11 @@ fn particles_to_grid(@builtin(global_invocation_id) id: vec3<u32>) {
                 - weight * p.mass * vec3<f32>(0.0, 9.81, 0.0);
 
             let idx = get_grid_index(vec2<u32>(current_coord));
-            atomicAdd(&grid[idx].mass, i32(round(mass_contribution * FIXED_POINT_SCALE)));
-            atomicAdd(&grid[idx].momentum_x, i32(round(momentum_contribution.x * FIXED_POINT_SCALE)));
-            atomicAdd(&grid[idx].momentum_y, i32(round(momentum_contribution.y * FIXED_POINT_SCALE)));
-            atomicAdd(&grid[idx].force_x, i32(round(force_contribution.x * FIXED_POINT_SCALE)));
-            atomicAdd(&grid[idx].force_y, i32(round(force_contribution.y * FIXED_POINT_SCALE)));
+            atomic_add_mass(idx, mass_contribution);
+            atomic_add_momentum_x(idx, momentum_contribution.x);
+            atomic_add_momentum_y(idx, momentum_contribution.y);
+            atomic_add_force_x(idx, force_contribution.x);
+            atomic_add_force_y(idx, force_contribution.y);
         }
     }
 }
