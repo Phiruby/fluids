@@ -17,14 +17,20 @@ struct GridParticle {
     force_z: f32,
 }
 
-const DX: f32 = 0.02;
+struct ColliderUniform {
+    min: vec3<f32>,
+    max: vec3<f32>,
+}
+
+const DX: f32 = 0.01;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const N: u32 = 64u;
+const N: u32 = 192u;
 const D_INV = 4.0 / (DX * DX);
 const DT = 0.0001;
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> grid: array<GridParticle>;
+@group(0) @binding(2) var<uniform> collider: ColliderUniform;
 
 fn quadratic_kernel(r: f32) -> f32 {
     let ar = abs(r);
@@ -76,7 +82,7 @@ fn grid_to_particles(@builtin(global_invocation_id) id: vec3<u32>) {
             let weight = quadratic_kernel(r.x) * quadratic_kernel(r.y);
             let idx = get_grid_index(vec2<u32>(current_coord));
 
-            if grid[idx].mass <= 0 { continue; }
+            if grid[idx].mass <= 1e-8 { continue; }
             let vi = vec3<f32>(
                 f32(grid[idx].momentum_x),
                 f32(grid[idx].momentum_y),
@@ -103,9 +109,28 @@ fn grid_to_particles(@builtin(global_invocation_id) id: vec3<u32>) {
         0.0, 0.0, 1.0,
     );
     p.position = vec3<f32>(
-        clamp(new_pos.x, DX, f32(N - 2) * DX),
-        clamp(new_pos.y, DX, f32(N - 2) * DX),
+        clamp(new_pos.x, BOTTOM_LEFT.x + DX, BOTTOM_LEFT.x + f32(N - 2) * DX),
+        clamp(new_pos.y, BOTTOM_LEFT.y + DX, BOTTOM_LEFT.y + f32(N - 2) * DX),
         0.0,
     );
+
+    let wall_min = collider.min.xy;
+    let wall_max = collider.max.xy;
+    // ideally we want x_n = x + v (and no DT multiple. this is so we predict 1 second ahead).
+    // but this caused unusual behavior, so predict 5 steps ahead
+    let x_n = p.position.xy + 15 * DT * p.velocity.xy;
+    if x_n.x < wall_min.x {
+        p.velocity.x += wall_min.x - x_n.x;
+    }
+    if x_n.x > wall_max.x {
+        p.velocity.x += wall_max.x - x_n.x;
+    }
+    if x_n.y < wall_min.y {
+        p.velocity.y += wall_min.y - x_n.y;
+    }
+    if x_n.y > wall_max.y {
+        p.velocity.y += wall_max.y - x_n.y;
+    }
+
     particles[p_idx] = p;
 }

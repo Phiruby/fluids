@@ -5,7 +5,6 @@ pub struct StationaryBox {
     pub max: [f32; 3],
 }
 
-
 const WALL_MARGIN: f32 = 2.0 * MPM_DX;
 
 fn grid_node_max_xy() -> [f32; 2] {

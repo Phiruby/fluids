@@ -13,10 +13,11 @@ struct ColliderUniform {
     max: vec3<f32>,
 }
 
-const DX: f32 = 0.02;
+const DX: f32 = 0.01;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const N: u32 = 64u;
+const N: u32 = 192u;
 const DT = 0.0001;
+const MU = 0.4; // friction
 
 @group(0) @binding(0) var<storage, read_write> grid: array<GridParticle>;
 @group(0) @binding(1) var<uniform> collider: ColliderUniform;
@@ -52,10 +53,14 @@ fn collide_velocity(pos: vec2<f32>, v: vec2<f32>) -> vec2<f32> {
     }
     let n = -sd_box2_normal(pos, bmin, bmax);
     let vn = dot(v, n);
-    if vn < 0.0 {
-        return v - vn * n;
+    if vn >= 0.0 {
+        return v;
     }
-    return v;
+    let vt = v - vn * n;
+    if length(vt) <= -MU * vn {
+        return vec2<f32>(0.0);
+    }
+    return vt + MU * vn * vt / length(vt);
 }
 
 @compute
@@ -64,7 +69,7 @@ fn update_momentum(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= arrayLength(&grid) { return; }
     var p = grid[idx];
-    if p.mass <= 0 { return; }
+    if p.mass <= 1e-8 { return; }
 
     var mom = vec2<f32>(
         f32(p.momentum_x) + f32(p.force_x) * DT,
@@ -78,12 +83,6 @@ fn update_momentum(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     let mass = f32(p.mass);
     var v = mom / mass;
-    if coord.x < 2u || coord.x > N - 3u {
-        v.x = 0.0;
-    }
-    if coord.y < 2u || coord.y > N - 3u {
-        v.y = 0.0;
-    }
 
     v = collide_velocity(node_pos, v);
     mom = v * mass;

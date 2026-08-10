@@ -56,11 +56,11 @@ const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
 
-const MPM_BLOCK_NX: usize = 40;
-const MPM_BLOCK_NY: usize = 40;
-const MPM_SPACING: f32 = 0.015;
-const MPM_ORIGIN: [f32; 3] = [0.35, 0.70, 0.0];
-const MPM_PARTICLE_RADIUS: f32 = 0.006;
+const MPM_BLOCK_NX: usize = 100;
+const MPM_BLOCK_NY: usize = 100;
+const MPM_SPACING: f32 = 0.01;
+const MPM_ORIGIN: [f32; 3] = [0.45, 0.60, 0.0];
+const MPM_PARTICLE_RADIUS: f32 = 0.003;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
 const CONTAINER_MAX: [f32; 3] = [0.1, 1.85, 0.8];
@@ -188,7 +188,7 @@ impl State {
                 force_fallback_adapter: false,
             })
             .await?;
-        
+
         let device_limits = adapter.limits();
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -558,8 +558,7 @@ impl State {
                         &self.sph_wireframe,
                     );
                 }
-                SimBackend::Mpm => {
-                }
+                SimBackend::Mpm => {}
             }
         }
 

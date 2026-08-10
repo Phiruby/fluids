@@ -19,12 +19,12 @@ struct GridParticle {
     force_z: atomic<u32>,
 }
 
-const DX: f32 = 0.02;
+const DX: f32 = 0.01;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const N: u32 = 64u;
+const N: u32 = 192u;
 const D_INV = 4.0 / (DX * DX);
 const GAMMA = 7.0;
-const K = 10000.0;
+const K = 1000.0;
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> grid: array<GridParticle>;
@@ -91,7 +91,8 @@ fn fluid_stress(idx: u32) -> mat3x3<f32> {
     let tr = strain[0][0] + strain[1][1];
     strain[0][1] = tr;
     strain[1][0] = tr;
-    return mat3x3<f32>(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0) + 0.5 * strain;
+    return mat3x3<f32>(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0);
+    // return mat3x3<f32>(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0) + 0.9 * strain;
 }
 
 fn quadratic_kernel(r: f32) -> f32 {

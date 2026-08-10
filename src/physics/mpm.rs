@@ -5,8 +5,8 @@ use wgpu::util::DeviceExt;
 
 pub use objects::mpm_collider_bounds;
 
-pub const MPM_N: u32 = 64;
-pub const MPM_DX: f32 = 0.02;
+pub const MPM_N: u32 = 192;
+pub const MPM_DX: f32 = 0.01;
 pub const MPM_BOTTOM_LEFT: [f32; 3] = [0.0, 0.0, 0.0];
 
 const N: u64 = MPM_N as u64;
@@ -246,6 +246,16 @@ impl G2P {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -270,6 +280,7 @@ impl G2P {
         encoder: &mut wgpu::CommandEncoder,
         particles: &wgpu::Buffer,
         grid: &wgpu::Buffer,
+        collider: &wgpu::Buffer,
         num_particles: u32,
     ) {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -283,6 +294,10 @@ impl G2P {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: collider.as_entire_binding(),
                 },
             ],
         });
@@ -327,18 +342,23 @@ impl MpmFluidSim {
         }
         const SUBSTEPS: u32 = 8;
         for _ in 0..SUBSTEPS {
-            self.p2g
-                .compute(device, encoder, &self.particles, self.num_particles);
-            self.grid_simulation
-                .compute(device, encoder, &self.p2g.grid);
-            self.g2p.compute(
-                device,
-                encoder,
-                &self.particles,
-                &self.p2g.grid,
-                self.num_particles,
-            );
+            self.substep(device, encoder);
         }
+    }
+
+    fn substep(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        self.p2g
+            .compute(device, encoder, &self.particles, self.num_particles);
+        self.grid_simulation
+            .compute(device, encoder, &self.p2g.grid);
+        self.g2p.compute(
+            device,
+            encoder,
+            &self.particles,
+            &self.p2g.grid,
+            &self.grid_simulation.collider_buffer,
+            self.num_particles,
+        );
     }
 
     pub fn particle_buffer(&self) -> &wgpu::Buffer {
@@ -382,7 +402,7 @@ mod mpm_step_tests {
         let after =
             dbg.read::<MpmFluidParticle>(&device, &queue, &sim.particles, particles.len() as u64);
         let grid = grid_dbg.read::<MpmGridNode>(&device, &queue, &sim.p2g.grid, (N * N) as u64);
-        let nonzero_mass = grid.iter().filter(|n| n.mass > 0).count();
+        let nonzero_mass = grid.iter().filter(|n| n.mass > 0.0).count();
 
         assert!(nonzero_mass > 0, "P2G deposited no mass");
         assert!(
