@@ -1,10 +1,12 @@
 use crate::texture::Texture;
 use wgpu;
 
+pub mod debug_plot;
 pub mod marching_cubes;
 mod pipelines;
 mod ssfr;
 use flume::bounded;
+pub use debug_plot::{LivePlot, PlotWindow};
 pub use marching_cubes::MarchingCubes;
 pub use pipelines::{
     MarchingCubesRenderPipeline, RenderPipeline, WireframeBox, WireframeBoxPipeline,
@@ -93,6 +95,9 @@ pub(in crate::graphics) fn create_pipeline(
 
 pub struct BufferDebug {
     staging_buffer: wgpu::Buffer,
+    plot: Option<LivePlot>,
+    sample_every: u32,
+    frame: u32,
 }
 
 impl BufferDebug {
@@ -103,7 +108,28 @@ impl BufferDebug {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        Self { staging_buffer }
+        Self {
+            staging_buffer,
+            plot: None,
+            sample_every: 1,
+            frame: 0,
+        }
+    }
+
+    /// Same as [`Self::new`], plus a live plot handle (window attached later on the event loop).
+    pub fn with_plot(device: &wgpu::Device, buffer_size: u64, title: &str) -> Self {
+        let mut dbg = Self::new(device, buffer_size);
+        dbg.plot = Some(LivePlot::new(title));
+        dbg.sample_every = 2;
+        dbg
+    }
+
+    pub fn sample_every(&mut self, n: u32) {
+        self.sample_every = n.max(1);
+    }
+
+    pub fn plot(&self) -> Option<&LivePlot> {
+        self.plot.as_ref()
     }
 
     /// Copy `buffer[..count]` to CPU. Submits its own copy — not for in-flight encoders.
@@ -141,6 +167,34 @@ impl BufferDebug {
         };
         self.staging_buffer.unmap();
         values
+    }
+
+    /// Read buffer, reduce to named metrics, push to the live plot (if enabled).
+    pub fn sample<T, F>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        buffer: &wgpu::Buffer,
+        count: u64,
+        t: f64,
+        reduce: F,
+    ) where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+        F: FnOnce(&[T]) -> Vec<(String, f64)>,
+    {
+        self.frame = self.frame.wrapping_add(1);
+        let Some(plot) = self.plot.clone() else {
+            return;
+        };
+        if !self.frame.is_multiple_of(self.sample_every) {
+            return;
+        }
+        let data = self.read::<T>(device, queue, buffer, count);
+        let values = reduce(&data);
+        if values.is_empty() {
+            log::warn!("BufferDebug::sample produced no metrics at t={t}");
+        }
+        plot.sample(t, values);
     }
 
     pub fn log<T: bytemuck::Pod + bytemuck::Zeroable + Debug>(
