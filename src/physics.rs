@@ -144,7 +144,8 @@ pub struct MpmFluidParticle {
     pub position: [f32; 3],
     _pad0: f32,
     pub velocity: [f32; 3],
-    pub rest_volume: f32,
+    /// computed similar to sph (sum w_i * m_i)
+    pub rest_density: f32,
     pub mass: f32,
     _pad1: [f32; 3],
 }
@@ -157,7 +158,7 @@ impl Default for MpmFluidParticle {
             position: [0.0; 3],
             _pad0: 0.0,
             velocity: [0.0; 3],
-            rest_volume: 0.0,
+            rest_density: 0.0,
             mass: 0.0,
             _pad1: [0.0; 3],
         }
@@ -171,7 +172,7 @@ impl GpuParticle for MpmFluidParticle {
         B: mat3x3<f32>,
         position: vec3<f32>,
         velocity: vec3<f32>,
-        rest_volume: f32,
+        rest_density: f32,
         mass: f32,
         "#
     }
@@ -208,13 +209,13 @@ impl RenderParticle for MpmFluidParticle {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MpmGridNode {
-    momentum_x: f32,
-    momentum_y: f32,
-    momentum_z: f32,
-    mass: f32,
-    force_x: f32,
-    force_y: f32,
-    force_z: f32,
+    pub momentum_x: f32,
+    pub momentum_y: f32,
+    pub momentum_z: f32,
+    pub mass: f32,
+    pub force_x: f32,
+    pub force_y: f32,
+    pub force_z: f32,
 }
 
 /// n x n x n cube of fluid particles
@@ -244,6 +245,64 @@ pub fn mpm_fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<MpmFl
     mpm_fluid_block(n, n, spacing, origin)
 }
 
+fn mpm_quadratic_kernel(r: f32) -> f32 {
+    let ar = r.abs();
+    if ar < 0.5 {
+        0.75 - ar * ar
+    } else if ar < 1.5 {
+        let t = 1.5 - ar;
+        0.5 * t * t
+    } else {
+        0.0
+    }
+}
+
+/// we want to compute rest density of particles in the grid. to do this, we
+/// want the particle's neighborhood to be filled. so we construct n x n grid, compute density with
+/// rho = \sum_{i} w_i * m_i (where we sum over grid nodes). we take rho of the center particle in the grid
+/// to be the representative rest density (since its neighborhood is full)
+pub fn mpm_lattice_rest_density(spacing: f32, mass: f32, dx: f32) -> f32 {
+    // Odd-sized patch so the center particle has a full symmetric neighborhood.
+    let n = 11usize;
+    let origin = 0.0;
+    let mut grid: std::collections::HashMap<(i32, i32), f32> = std::collections::HashMap::new();
+    let mut positions = Vec::with_capacity(n * n);
+    for i in 0..n {
+        for j in 0..n {
+            positions.push([origin + i as f32 * spacing, origin + j as f32 * spacing]);
+        }
+    }
+    for p in &positions {
+        let base_x = ((p[0] / dx) - 0.5).floor() as i32;
+        let base_y = ((p[1] / dx) - 0.5).floor() as i32;
+        for di in 0..3 {
+            for dj in 0..3 {
+                let cx = base_x + di;
+                let cy = base_y + dj;
+                let rx = (cx as f32 * dx - p[0]) / dx;
+                let ry = (cy as f32 * dx - p[1]) / dx;
+                let w = mpm_quadratic_kernel(rx) * mpm_quadratic_kernel(ry);
+                *grid.entry((cx, cy)).or_insert(0.0) += w * mass;
+            }
+        }
+    }
+    let p = positions[n * n / 2];
+    let base_x = ((p[0] / dx) - 0.5).floor() as i32;
+    let base_y = ((p[1] / dx) - 0.5).floor() as i32;
+    let mut density = 0.0;
+    for di in 0..3 {
+        for dj in 0..3 {
+            let cx = base_x + di;
+            let cy = base_y + dj;
+            let rx = (cx as f32 * dx - p[0]) / dx;
+            let ry = (cy as f32 * dx - p[1]) / dx;
+            let w = mpm_quadratic_kernel(rx) * mpm_quadratic_kernel(ry);
+            density += grid.get(&(cx, cy)).copied().unwrap_or(0.0) * w;
+        }
+    }
+    density
+}
+
 /// nx × ny block of fluid particles in the XY plane (z unused / pinned to origin.z).
 pub fn mpm_fluid_block(
     nx: usize,
@@ -254,6 +313,7 @@ pub fn mpm_fluid_block(
     let rest_volume = spacing * spacing;
     let density = 1000.0;
     let mass = density * rest_volume;
+    let rest_density = mpm_lattice_rest_density(spacing, mass, mpm::MPM_DX);
     let mut particles = Vec::with_capacity(nx * ny);
     for i in 0..nx {
         for j in 0..ny {
@@ -265,7 +325,7 @@ pub fn mpm_fluid_block(
                     origin.y + j as f32 * spacing,
                     origin.z,
                 ],
-                rest_volume,
+                rest_density,
                 mass,
                 ..Default::default()
             });

@@ -3,7 +3,7 @@ struct Particle {
     B: mat3x3<f32>,
     position: vec3<f32>,
     velocity: vec3<f32>,
-    rest_volume: f32,
+    rest_density: f32,
     mass: f32,
 }
 

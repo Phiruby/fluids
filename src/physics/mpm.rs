@@ -19,9 +19,11 @@ pub fn mpm_grid_bounds() -> ([f32; 3], [f32; 3]) {
     (min, max)
 }
 
-/// interpolate data from particles to grid nodes
+/// interpolate data from particles to grid nodes (two-pass: mass/momentum, then density stress).
+/// two-pass idea from https://nialltl.neocities.org/articles/mpm_guide
 struct P2G {
-    pipeline: wgpu::ComputePipeline,
+    mass_pipeline: wgpu::ComputePipeline,
+    stress_pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     grid: wgpu::Buffer,
 }
@@ -59,11 +61,19 @@ impl P2G {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("p2g"),
+        let mass_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("p2g_mass"),
             layout: Some(&pipeline_layout),
             module: &module,
             entry_point: Some("particles_to_grid"),
+            cache: Default::default(),
+            compilation_options: Default::default(),
+        });
+        let stress_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("p2g_stress"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("particles_to_grid_stress"),
             cache: Default::default(),
             compilation_options: Default::default(),
         });
@@ -76,7 +86,8 @@ impl P2G {
             mapped_at_creation: false,
         });
         Self {
-            pipeline,
+            mass_pipeline,
+            stress_pipeline,
             layout,
             grid,
         }
@@ -104,10 +115,19 @@ impl P2G {
                 },
             ],
         });
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(num_particles.div_ceil(WG_SIZE), 1, 1);
+        let groups = num_particles.div_ceil(WG_SIZE);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.mass_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(groups, 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.stress_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(groups, 1, 1);
+        }
     }
 }
 
@@ -365,8 +385,16 @@ impl MpmFluidSim {
         &self.particles
     }
 
+    pub fn grid_buffer(&self) -> &wgpu::Buffer {
+        &self.p2g.grid
+    }
+
     pub fn num_particles(&self) -> u32 {
         self.num_particles
+    }
+
+    pub fn num_grid_nodes(&self) -> u32 {
+        (N * N) as u32
     }
 }
 
