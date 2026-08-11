@@ -3,13 +3,9 @@ mod graphics;
 mod physics;
 mod texture;
 use crate::camera::CameraController;
-use crate::graphics::debug_plot::{
-    mpm_elastic_particle_metrics, mpm_one_elastic_particle_metrics, mpm_one_particle_metrics,
-    mpm_particle_metrics,
-};
 use crate::graphics::{
-    BufferDebug, MarchingCubes, MarchingCubesRenderPipeline, PlotWindow, RenderPipeline,
-    ScreenSpaceRendering, WireframeBox, WireframeBoxPipeline,
+    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, ScreenSpaceRendering, WireframeBox,
+    WireframeBoxPipeline,
 };
 use crate::physics::{
     ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmElasticParticle, MpmFluidParticle,
@@ -56,9 +52,7 @@ enum MpmMaterial {
 const SIM_BACKEND: SimBackend = SimBackend::Mpm;
 // marching cubes slow and bad :(
 const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::Particles;
-/// open plot for mpm particles
-const MPM_LIVE_PLOT: bool = true;
-const MPM_MATERIAL: MpmMaterial = MpmMaterial::Elastic;
+const MPM_MATERIAL: MpmMaterial = MpmMaterial::Fluid;
 
 const FLUID_GRID_N: usize = 30;
 const FLUID_SPACING: f32 = 0.03;
@@ -69,14 +63,12 @@ const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
 
-const MPM_BLOCK_NX: usize = 50;
-const MPM_BLOCK_NY: usize = 50;
-const MPM_SPACING: f32 = 0.01;
-const MPM_ORIGIN: [f32; 3] = [0.45, 0.40, 0.0];
-const MPM_ELASTIC_BLOCK_NX: usize = 50;
-const MPM_ELASTIC_BLOCK_NY: usize = 50;
-const MPM_ELASTIC_ORIGIN: [f32; 3] = [0.45, 0.40, 0.0];
-const MPM_PARTICLE_RADIUS: f32 = 0.003;
+const MPM_BLOCK_N: usize = 16;
+const MPM_SPACING: f32 = 0.02;
+const MPM_ORIGIN: [f32; 3] = [0.16, 0.28, 0.16];
+const MPM_ELASTIC_BLOCK_N: usize = 16;
+const MPM_ELASTIC_ORIGIN: [f32; 3] = [0.16, 0.28, 0.16];
+const MPM_PARTICLE_RADIUS: f32 = 0.006;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
 const CONTAINER_MAX: [f32; 3] = [0.1, 1.85, 0.8];
@@ -97,24 +89,12 @@ pub(crate) struct Camera {
     fovy: f32,
     znear: f32,
     zfar: f32,
-    /// use orthographic projection (for 2D MPM)
-    ortho_half_extent: Option<f32>,
 }
 impl Camera {
     fn build_view_projection_matrix(&self) -> (cgmath::Matrix4<f32>, cgmath::Matrix4<f32>) {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
-        let projection = if let Some(half) = self.ortho_half_extent {
-            let (half_x, half_y) = if self.aspect >= 1.0 {
-                (half * self.aspect, half)
-            } else {
-                (half, half / self.aspect)
-            };
-            OPENGL_TO_WGPU_MATRIX
-                * cgmath::ortho(-half_x, half_x, -half_y, half_y, self.znear, self.zfar)
-        } else {
-            OPENGL_TO_WGPU_MATRIX
-                * cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar)
-        };
+        let projection = OPENGL_TO_WGPU_MATRIX
+            * cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
         (projection, view)
     }
 
@@ -122,31 +102,6 @@ impl Camera {
         let focal_y = 1.0 / (self.fovy.to_radians() * 0.5).tan();
         let focal_x = focal_y / self.aspect;
         (focal_x, focal_y)
-    }
-
-    /// Unproject a screen pixel to the z=0 plane (MPM is 2D in XY).
-    // used for selecting mpm particles for plotting
-    fn screen_to_world_xy(&self, px: f64, py: f64, width: u32, height: u32) -> Option<[f32; 2]> {
-        if width == 0 || height == 0 {
-            return None;
-        }
-        let ndc_x = (px as f32 / width as f32) * 2.0 - 1.0;
-        let ndc_y = 1.0 - (py as f32 / height as f32) * 2.0;
-        let (proj, view) = self.build_view_projection_matrix();
-        let inv = (proj * view).invert()?;
-        let unproject = |z: f32| {
-            let v = inv * cgmath::Vector4::new(ndc_x, ndc_y, z, 1.0);
-            let w = v.w;
-            cgmath::Vector3::new(v.x / w, v.y / w, v.z / w)
-        };
-        let near = unproject(0.0);
-        let far = unproject(1.0);
-        let dz = far.z - near.z;
-        if dz.abs() < 1e-8 {
-            return Some([near.x, near.y]);
-        }
-        let t = -near.z / dz;
-        Some([near.x + (far.x - near.x) * t, near.y + (far.y - near.y) * t])
     }
 }
 pub struct State {
@@ -176,15 +131,6 @@ pub struct State {
     depth_texture: Texture,
     fluid_sim: FluidSim,
     mpm_fluid_sim: MpmFluidSim,
-    mpm_debug: Option<BufferDebug>,
-    sim_time: f64,
-    cursor: Option<(f64, f64)>,
-    /// Particle followed in the live plot after a left-click pick.
-    tracked_particle: Option<usize>,
-    /// `sim_time` when the current track started (plot x-axis origin).
-    track_t0: f64,
-    #[cfg(not(target_arch = "wasm32"))]
-    plot_window: Option<PlotWindow>,
 }
 
 #[repr(C)]
@@ -285,20 +231,23 @@ impl State {
         let mpm_center = [
             0.5 * (mpm_min[0] + mpm_max[0]),
             0.5 * (mpm_min[1] + mpm_max[1]),
-            0.0,
+            0.5 * (mpm_min[2] + mpm_max[2]),
         ];
-        let mpm_half_extent = 0.5 * (mpm_max[0] - mpm_min[0]) + 0.06;
 
         let camera = if SIM_BACKEND == SimBackend::Mpm {
             Camera {
-                eye: (mpm_center[0], mpm_center[1], 3.0).into(),
-                target: (mpm_center[0], mpm_center[1], 0.0).into(),
+                eye: (
+                    mpm_center[0] + 1.4,
+                    mpm_center[1] + 1.0,
+                    mpm_center[2] + 1.8,
+                )
+                    .into(),
+                target: (mpm_center[0], mpm_center[1], mpm_center[2]).into(),
                 up: (0.0, 1.0, 0.0).into(),
                 aspect: config.width as f32 / config.height as f32,
                 fovy: 45.0,
                 znear: 0.1,
                 zfar: 100.0,
-                ortho_half_extent: Some(mpm_half_extent),
             }
         } else {
             Camera {
@@ -309,7 +258,6 @@ impl State {
                 fovy: 45.0,
                 znear: 0.1,
                 zfar: 100.0,
-                ortho_half_extent: None,
             }
         };
 
@@ -385,8 +333,9 @@ impl State {
         let (mpm_particles, mpm_elastic_particles) = match MPM_MATERIAL {
             MpmMaterial::Fluid => (
                 mpm_fluid_block(
-                    MPM_BLOCK_NX,
-                    MPM_BLOCK_NY,
+                    MPM_BLOCK_N,
+                    MPM_BLOCK_N,
+                    MPM_BLOCK_N,
                     MPM_SPACING,
                     Vector3::from(MPM_ORIGIN),
                 ),
@@ -395,21 +344,15 @@ impl State {
             MpmMaterial::Elastic => (
                 Vec::new(),
                 mpm_elastic_block(
-                    MPM_ELASTIC_BLOCK_NX,
-                    MPM_ELASTIC_BLOCK_NY,
+                    MPM_ELASTIC_BLOCK_N,
+                    MPM_ELASTIC_BLOCK_N,
+                    MPM_ELASTIC_BLOCK_N,
                     MPM_SPACING,
                     Vector3::from(MPM_ELASTIC_ORIGIN),
                 ),
             ),
         };
         let mpm_fluid_sim = MpmFluidSim::new(&device, &mpm_particles, &mpm_elastic_particles);
-        let mpm_debug = MPM_LIVE_PLOT.then(|| {
-            let buf = match MPM_MATERIAL {
-                MpmMaterial::Fluid => mpm_fluid_sim.particle_buffer(),
-                MpmMaterial::Elastic => mpm_fluid_sim.elastic_particle_buffer(),
-            };
-            BufferDebug::with_plot(&device, buf.size(), "MPM metrics")
-        });
         let fluid_pipeline = RenderPipeline::new(
             &device,
             &camera_bind_group_layout,
@@ -468,13 +411,6 @@ impl State {
             depth_texture,
             fluid_sim,
             mpm_fluid_sim,
-            mpm_debug,
-            sim_time: 0.0,
-            cursor: None,
-            tracked_particle: None,
-            track_t0: 0.0,
-            #[cfg(not(target_arch = "wasm32"))]
-            plot_window: None,
             screen_space_rendering,
         })
     }
@@ -566,20 +502,11 @@ impl State {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(if SIM_BACKEND == SimBackend::Mpm {
-                            wgpu::Color {
-                                r: 0.18,
-                                g: 0.49,
-                                b: 0.42,
-                                a: 1.0,
-                            }
-                        } else {
-                            wgpu::Color {
-                                r: 0.0,
-                                g: 0.0,
-                                b: 0.0,
-                                a: 1.0,
-                            }
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -655,67 +582,23 @@ impl State {
                         &self.sph_wireframe,
                     );
                 }
-                SimBackend::Mpm => {}
+                SimBackend::Mpm => {
+                    self.wireframe_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        &self.mpm_wireframe,
+                    );
+                    self.wireframe_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        &self.mpm_collider_wireframe,
+                    );
+                }
             }
         }
 
         self.queue.submit([encoder.finish()]);
         output.present();
-
-        if SIM_BACKEND == SimBackend::Mpm {
-            self.sim_time += 1.0 / 60.0;
-            if let Some(dbg) = self.mpm_debug.as_mut() {
-                let tracked = self.tracked_particle;
-                let t = if tracked.is_some() {
-                    self.sim_time - self.track_t0
-                } else {
-                    self.sim_time
-                };
-                match MPM_MATERIAL {
-                    MpmMaterial::Fluid => {
-                        let n = self.mpm_fluid_sim.num_particles() as u64;
-                        dbg.sample(
-                            &self.device,
-                            &self.queue,
-                            self.mpm_fluid_sim.particle_buffer(),
-                            n,
-                            t,
-                            |ps: &[MpmFluidParticle]| {
-                                if let Some(i) = tracked {
-                                    if let Some(p) = ps.get(i) {
-                                        return mpm_one_particle_metrics(p);
-                                    }
-                                }
-                                mpm_particle_metrics(ps)
-                            },
-                        );
-                    }
-                    MpmMaterial::Elastic => {
-                        let n = self.mpm_fluid_sim.num_elastic_particles() as u64;
-                        dbg.sample(
-                            &self.device,
-                            &self.queue,
-                            self.mpm_fluid_sim.elastic_particle_buffer(),
-                            n,
-                            t,
-                            |ps: &[MpmElasticParticle]| {
-                                if let Some(i) = tracked {
-                                    if let Some(p) = ps.get(i) {
-                                        return mpm_one_elastic_particle_metrics(p);
-                                    }
-                                }
-                                mpm_elastic_particle_metrics(ps)
-                            },
-                        );
-                    }
-                }
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(plot) = self.plot_window.as_ref() {
-                plot.request_redraw();
-            }
-        }
-
         Ok(())
     }
 
@@ -756,95 +639,14 @@ impl State {
     }
 
     fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
-        if button == MouseButton::Left
-            && state == ElementState::Pressed
-            && SIM_BACKEND == SimBackend::Mpm
-            && MPM_LIVE_PLOT
-        {
-            self.pick_mpm_particle();
-        }
         self.camera_controller.process_mouse_button(button, state);
     }
 
     fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
-        self.cursor = Some((position.x, position.y));
         self.camera_controller
             .process_cursor_moved(position, &mut self.camera);
     }
 
-    fn pick_mpm_particle(&mut self) {
-        let Some((px, py)) = self.cursor else {
-            return;
-        };
-        let Some(world) =
-            self.camera
-                .screen_to_world_xy(px, py, self.config.width, self.config.height)
-        else {
-            return;
-        };
-        let Some(dbg) = self.mpm_debug.as_ref() else {
-            return;
-        };
-        let pick_r = (MPM_PARTICLE_RADIUS * 8.0).max(MPM_SPACING * 1.5);
-        let pick_r2 = pick_r * pick_r;
-        let (idx, pos) = match MPM_MATERIAL {
-            MpmMaterial::Fluid => {
-                let n = self.mpm_fluid_sim.num_particles() as u64;
-                let particles = dbg.read::<MpmFluidParticle>(
-                    &self.device,
-                    &self.queue,
-                    self.mpm_fluid_sim.particle_buffer(),
-                    n,
-                );
-                let mut best: Option<(usize, f32)> = None;
-                for (i, p) in particles.iter().enumerate() {
-                    let dx = p.position[0] - world[0];
-                    let dy = p.position[1] - world[1];
-                    let d2 = dx * dx + dy * dy;
-                    if d2 <= pick_r2 && best.is_none_or(|(_, bd)| d2 < bd) {
-                        best = Some((i, d2));
-                    }
-                }
-                let Some((idx, _)) = best else {
-                    self.window.set_title("fluids — no particle near click");
-                    return;
-                };
-                (idx, particles[idx].position)
-            }
-            MpmMaterial::Elastic => {
-                let n = self.mpm_fluid_sim.num_elastic_particles() as u64;
-                let particles = dbg.read::<MpmElasticParticle>(
-                    &self.device,
-                    &self.queue,
-                    self.mpm_fluid_sim.elastic_particle_buffer(),
-                    n,
-                );
-                let mut best: Option<(usize, f32)> = None;
-                for (i, p) in particles.iter().enumerate() {
-                    let dx = p.position[0] - world[0];
-                    let dy = p.position[1] - world[1];
-                    let d2 = dx * dx + dy * dy;
-                    if d2 <= pick_r2 && best.is_none_or(|(_, bd)| d2 < bd) {
-                        best = Some((i, d2));
-                    }
-                }
-                let Some((idx, _)) = best else {
-                    self.window.set_title("fluids — no particle near click");
-                    return;
-                };
-                (idx, particles[idx].position)
-            }
-        };
-        self.tracked_particle = Some(idx);
-        self.track_t0 = self.sim_time;
-        if let Some(plot) = dbg.plot() {
-            plot.reset(format!("particle {idx}  @ ({:.3}, {:.3})", pos[0], pos[1]));
-        }
-        self.window.set_title(&format!(
-            "fluids — tracking particle {idx} ({:.3}, {:.3})",
-            pos[0], pos[1]
-        ));
-    }
 
     fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
@@ -900,16 +702,7 @@ impl ApplicationHandler<State> for App {
         {
             // If we are not on web we can use pollster to
             // await the
-            let mut state = pollster::block_on(State::new(window)).unwrap();
-            if MPM_LIVE_PLOT {
-                if let Some(plot) = state.mpm_debug.as_ref().and_then(|d| d.plot().cloned()) {
-                    match PlotWindow::open(event_loop, plot) {
-                        Ok(win) => state.plot_window = Some(win),
-                        Err(err) => log::error!("failed to open plot window: {err:?}"),
-                    }
-                }
-            }
-            self.state = Some(state);
+            self.state = Some(pollster::block_on(State::new(window)).unwrap());
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -948,52 +741,13 @@ impl ApplicationHandler<State> for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        window_id: winit::window::WindowId,
+        _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
         let state = match &mut self.state {
             Some(canvas) => canvas,
             None => return,
         };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let is_plot = state
-            .plot_window
-            .as_ref()
-            .is_some_and(|w| w.window_id() == window_id);
-        #[cfg(target_arch = "wasm32")]
-        let is_plot = false;
-
-        if is_plot {
-            #[cfg(not(target_arch = "wasm32"))]
-            match event {
-                WindowEvent::CloseRequested => {
-                    state.plot_window = None;
-                }
-                WindowEvent::Resized(size) => {
-                    if let Some(plot) = state.plot_window.as_mut() {
-                        plot.resize(size.width, size.height);
-                    }
-                }
-                WindowEvent::CursorMoved { position, .. } => {
-                    if let Some(plot) = state.plot_window.as_mut() {
-                        plot.set_cursor(position.x, position.y);
-                    }
-                }
-                WindowEvent::CursorLeft { .. } => {
-                    if let Some(plot) = state.plot_window.as_mut() {
-                        plot.clear_cursor();
-                    }
-                }
-                WindowEvent::RedrawRequested => {
-                    if let Some(plot) = state.plot_window.as_mut() {
-                        plot.paint();
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),

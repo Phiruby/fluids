@@ -326,46 +326,66 @@ fn mpm_quadratic_kernel(r: f32) -> f32 {
 }
 
 /// we want to compute rest density of particles in the grid. to do this, we
-/// want the particle's neighborhood to be filled. so we construct n x n grid, compute density with
+/// want the particle's neighborhood to be filled. so we construct n x n x n grid, compute density with
 /// rho = \sum_{i} w_i * m_i (where we sum over grid nodes). we take rho of the center particle in the grid
 /// to be the representative rest density (since its neighborhood is full)
 pub fn mpm_lattice_rest_density(spacing: f32, mass: f32, dx: f32) -> f32 {
-    // Odd-sized patch so the center particle has a full symmetric neighborhood.
-    let n = 11usize;
+    let n = 7usize;
     let origin = 0.0;
-    let mut grid: std::collections::HashMap<(i32, i32), f32> = std::collections::HashMap::new();
-    let mut positions = Vec::with_capacity(n * n);
+    let mut grid: std::collections::HashMap<(i32, i32, i32), f32> =
+        std::collections::HashMap::new();
+    let mut positions = Vec::with_capacity(n * n * n);
     for i in 0..n {
         for j in 0..n {
-            positions.push([origin + i as f32 * spacing, origin + j as f32 * spacing]);
+            for k in 0..n {
+                positions.push([
+                    origin + i as f32 * spacing,
+                    origin + j as f32 * spacing,
+                    origin + k as f32 * spacing,
+                ]);
+            }
         }
     }
     for p in &positions {
         let base_x = ((p[0] / dx) - 0.5).floor() as i32;
         let base_y = ((p[1] / dx) - 0.5).floor() as i32;
+        let base_z = ((p[2] / dx) - 0.5).floor() as i32;
         for di in 0..3 {
             for dj in 0..3 {
-                let cx = base_x + di;
-                let cy = base_y + dj;
-                let rx = (cx as f32 * dx - p[0]) / dx;
-                let ry = (cy as f32 * dx - p[1]) / dx;
-                let w = mpm_quadratic_kernel(rx) * mpm_quadratic_kernel(ry);
-                *grid.entry((cx, cy)).or_insert(0.0) += w * mass;
+                for dk in 0..3 {
+                    let cx = base_x + di;
+                    let cy = base_y + dj;
+                    let cz = base_z + dk;
+                    let rx = (cx as f32 * dx - p[0]) / dx;
+                    let ry = (cy as f32 * dx - p[1]) / dx;
+                    let rz = (cz as f32 * dx - p[2]) / dx;
+                    let w = mpm_quadratic_kernel(rx)
+                        * mpm_quadratic_kernel(ry)
+                        * mpm_quadratic_kernel(rz);
+                    *grid.entry((cx, cy, cz)).or_insert(0.0) += w * mass;
+                }
             }
         }
     }
-    let p = positions[n * n / 2];
+    let p = positions[n * n * n / 2];
     let base_x = ((p[0] / dx) - 0.5).floor() as i32;
     let base_y = ((p[1] / dx) - 0.5).floor() as i32;
+    let base_z = ((p[2] / dx) - 0.5).floor() as i32;
     let mut density = 0.0;
     for di in 0..3 {
         for dj in 0..3 {
-            let cx = base_x + di;
-            let cy = base_y + dj;
-            let rx = (cx as f32 * dx - p[0]) / dx;
-            let ry = (cy as f32 * dx - p[1]) / dx;
-            let w = mpm_quadratic_kernel(rx) * mpm_quadratic_kernel(ry);
-            density += grid.get(&(cx, cy)).copied().unwrap_or(0.0) * w;
+            for dk in 0..3 {
+                let cx = base_x + di;
+                let cy = base_y + dj;
+                let cz = base_z + dk;
+                let rx = (cx as f32 * dx - p[0]) / dx;
+                let ry = (cy as f32 * dx - p[1]) / dx;
+                let rz = (cz as f32 * dx - p[2]) / dx;
+                let w = mpm_quadratic_kernel(rx)
+                    * mpm_quadratic_kernel(ry)
+                    * mpm_quadratic_kernel(rz);
+                density += grid.get(&(cx, cy, cz)).copied().unwrap_or(0.0) * w;
+            }
         }
     }
     density
@@ -373,66 +393,70 @@ pub fn mpm_lattice_rest_density(spacing: f32, mass: f32, dx: f32) -> f32 {
 
 pub fn mpm_lattice_rest_volume(spacing: f32, mass: f32, dx: f32) -> f32 {
     let density = mpm_lattice_rest_density(spacing, mass, dx);
-    (mass / density) * dx * dx
+    (mass / density) * dx * dx * dx
 }
 
-/// nx × ny block of fluid particles in the XY plane (z unused / pinned to origin.z).
 pub fn mpm_fluid_block(
     nx: usize,
     ny: usize,
+    nz: usize,
     spacing: f32,
     origin: Vector3<f32>,
 ) -> Vec<MpmFluidParticle> {
-    let rest_volume = spacing * spacing;
+    let rest_volume = spacing * spacing * spacing;
     let density = 1000.0;
     let mass = density * rest_volume;
     let rest_density = mpm_lattice_rest_density(spacing, mass, mpm::MPM_DX);
-    let mut particles = Vec::with_capacity(nx * ny);
+    let mut particles = Vec::with_capacity(nx * ny * nz);
     for i in 0..nx {
         for j in 0..ny {
-            particles.push(MpmFluidParticle {
-                deformation_gradient: wgsl_mat3_identity(),
-                b: [[0.0; 4]; 3],
-                position: [
-                    origin.x + i as f32 * spacing,
-                    origin.y + j as f32 * spacing,
-                    origin.z,
-                ],
-                rest_density,
-                mass,
-                ..Default::default()
-            });
+            for k in 0..nz {
+                particles.push(MpmFluidParticle {
+                    deformation_gradient: wgsl_mat3_identity(),
+                    b: [[0.0; 4]; 3],
+                    position: [
+                        origin.x + i as f32 * spacing,
+                        origin.y + j as f32 * spacing,
+                        origin.z + k as f32 * spacing,
+                    ],
+                    rest_density,
+                    mass,
+                    ..Default::default()
+                });
+            }
         }
     }
     particles
 }
 
-/// square elastic block (in 2D right now)
 pub fn mpm_elastic_block(
     nx: usize,
     ny: usize,
+    nz: usize,
     spacing: f32,
     origin: Vector3<f32>,
 ) -> Vec<MpmElasticParticle> {
     let material_density = 400.0;
-    let mass = material_density * spacing * spacing;
+    let mass = material_density * spacing * spacing * spacing;
     let rest_volume = mpm_lattice_rest_volume(spacing, mass, mpm::MPM_DX);
-    let mut particles = Vec::with_capacity(nx * ny);
+    let mut particles = Vec::with_capacity(nx * ny * nz);
     for i in 0..nx {
         for j in 0..ny {
-            particles.push(MpmElasticParticle {
-                elastic_deformation_gradient: wgsl_mat3_identity(),
-                b: [[0.0; 4]; 3],
-                position: [
-                    origin.x + i as f32 * spacing,
-                    origin.y + j as f32 * spacing,
-                    origin.z,
-                ],
-                plastic_deformation_determinant: 1.0,
-                rest_volume,
-                mass,
-                ..Default::default()
-            });
+            for k in 0..nz {
+                particles.push(MpmElasticParticle {
+                    elastic_deformation_gradient: wgsl_mat3_identity(),
+                    b: [[0.0; 4]; 3],
+                    position: [
+                        origin.x + i as f32 * spacing,
+                        origin.y + j as f32 * spacing,
+                        origin.z + k as f32 * spacing,
+                    ],
+                    plastic_deformation_determinant: 1.0,
+                    rest_volume,
+                    mass,
+                    ..Default::default()
+                });
+            }
         }
     }
     particles
