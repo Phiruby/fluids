@@ -470,7 +470,6 @@ fn draw_text(buf: &mut [u32], w: usize, x: usize, y: usize, text: &str, c: u32) 
 }
 
 fn glyph(ch: char) -> Option<[u8; 7]> {
-    // 5-bit rows. Enough for status strings.
     Some(match ch {
         ' ' => [0; 7],
         '-' => [0, 0, 0, 0b11111, 0, 0, 0],
@@ -574,6 +573,10 @@ pub fn mpm_elastic_particle_metrics(ps: &[MpmElasticParticle]) -> Vec<(String, f
     let mut max_speed = 0.0f64;
     let mut min_j = f64::MAX;
     let mut max_j = f64::MIN;
+    let mut min_jp = f64::MAX;
+    let mut max_jp = f64::MIN;
+    let mut sum_jp = 0.0f64;
+    let mut n_jp = 0.0f64;
     let mut nan = 0.0;
     for p in ps {
         let sp = (p.velocity[0] * p.velocity[0] + p.velocity[1] * p.velocity[1]).sqrt() as f64;
@@ -588,15 +591,30 @@ pub fn mpm_elastic_particle_metrics(ps: &[MpmElasticParticle]) -> Vec<(String, f
             min_j = min_j.min(j);
             max_j = max_j.max(j);
         }
+        let jp = p.plastic_deformation_determinant as f64;
+        if jp.is_finite() {
+            min_jp = min_jp.min(jp);
+            max_jp = max_jp.max(jp);
+            sum_jp += jp;
+            n_jp += 1.0;
+        }
     }
     if min_j == f64::MAX {
         min_j = 0.0;
         max_j = 0.0;
     }
+    if min_jp == f64::MAX {
+        min_jp = 0.0;
+        max_jp = 0.0;
+    }
+    let mean_jp = if n_jp > 0.0 { sum_jp / n_jp } else { 0.0 };
     vec![
         ("max_speed".into(), max_speed),
         ("min_j".into(), min_j),
         ("max_j".into(), max_j),
+        ("min_Jp".into(), min_jp),
+        ("max_Jp".into(), max_jp),
+        ("mean_Jp".into(), mean_jp),
         ("nan_count".into(), nan),
     ]
 }

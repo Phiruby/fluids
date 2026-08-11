@@ -423,7 +423,6 @@ fn particle_storage_buffer<T: bytemuck::Pod>(
     label: &str,
     particles: &[T],
 ) -> wgpu::Buffer {
-    // wgpu rejects zero-sized buffers; keep a one-slot placeholder when empty.
     if particles.is_empty() {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),

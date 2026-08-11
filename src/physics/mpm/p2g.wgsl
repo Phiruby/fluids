@@ -264,6 +264,7 @@ const POISSON_RATIO = 0.1;
 const YOUNG = 100000.0;
 const MU = YOUNG / (2.0 * (1 + POISSON_RATIO));
 const LAMBDA = YOUNG * POISSON_RATIO / ((1.0 + POISSON_RATIO) * (1.0 - 2.0 * POISSON_RATIO));
+const XI = 4;
 
 /// constitutive model from https://nialltl.neocities.org/articles/mpm_guide
 @compute
@@ -277,8 +278,12 @@ fn elastic_particles_to_grid_stress(@builtin(global_invocation_id) id: vec3<u32>
     let J = max(det2(F), 1e-6);
     let F_inv_T = inv_transpose_2d(F);
     let identity = mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+    
+    let exponential = clamp(XI * (1 - p.plastic_deformation_determinant), -10.0, 100.0);
+    let mu = MU * exp(exponential);
+    let lambda = LAMBDA * exp(exponential);
     // neo-hookean
-    let tau = MU * (F - F_inv_T) * transpose(F) + LAMBDA * log(J) * identity;
+    let tau = mu * (F - F_inv_T) * transpose(F) + lambda * log(J) * identity;
 
     push_to_grid(p.position, p.rest_volume, tau);
 }
