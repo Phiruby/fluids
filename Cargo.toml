@@ -25,6 +25,7 @@ ndarray-linalg = { version = "0.18.1", features = ["intel-mkl-system"] }
 spatial_hash_3d = "0.1.6"
 ndarray = "0.17.2"
 flume = "0.12.0"
+regex = "1.13.1"
 
 #[profile.release]
 #debug = true

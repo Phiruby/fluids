@@ -1,21 +1,30 @@
-mod boundaries;
-mod fluids;
+mod mpm;
+mod pipelines;
+mod sph;
 use nalgebra::Vector3;
 use std::ops::Add;
 
-pub use boundaries::ContainerBoundary;
-pub use fluids::FluidSim;
-pub(crate) use fluids::PrefixSum;
+pub use mpm::{MpmFluidSim, mpm_collider_bounds, mpm_grid_bounds};
+pub(crate) use pipelines::PrefixSum;
+pub use sph::boundaries::ContainerBoundary;
+pub use sph::fluids::FluidSim;
 
 pub const FLUID_COLOR: [f32; 3] = [0.2, 0.5, 0.95];
 
-#[derive(Debug, Clone)]
-#[allow(unused)]
-pub struct PhysicsVertex {
-    pub position: Vector3<f32>,
-    pub velocity: Vector3<f32>,
-    pub renderable: bool,
-    pub mass: f32,
+pub trait GpuParticle {
+    /// this should return fields as used in wgsl
+    fn wgsl_fields() -> &'static str;
+    /// if true, particles will be compacted before drawing (for ssfr)
+    fn ssfr_needs_compaction() -> bool {
+        false
+    }
+}
+
+/// for particles that can be drawn with the instanced cube pipeline
+pub trait RenderParticle: GpuParticle {
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static>;
+    fn instance_wgsl_fields() -> &'static str;
+    fn vs_main_body() -> &'static str;
 }
 
 #[repr(C)]
@@ -50,10 +59,27 @@ impl Default for FluidParticle {
     }
 }
 
-impl FluidParticle {
-    /// Per-instance layout so the render pipeline can read particles straight
-    /// from the simulation buffer (position, `normal` as color, boundary flag).
-    pub fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+impl GpuParticle for FluidParticle {
+    fn wgsl_fields() -> &'static str {
+        r#"
+        position: vec3<f32>,
+        velocity: vec3<f32>,
+        normal: vec3<f32>,
+        density: f32,
+        rest_density: f32,
+        mass: f32,
+        cell_hash: u32,
+        boundary: u32,
+        "#
+    }
+
+    fn ssfr_needs_compaction() -> bool {
+        true
+    }
+}
+
+impl RenderParticle for FluidParticle {
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -77,6 +103,23 @@ impl FluidParticle {
         }
     }
 
+    fn instance_wgsl_fields() -> &'static str {
+        r#"
+        @location(2) instance_position: vec3<f32>,
+        @location(3) color: vec3<f32>,
+        @location(4) boundary: u32,
+        "#
+    }
+
+    fn vs_main_body() -> &'static str {
+        r#"
+        if input.boundary == 0u { return culled(); }
+        return particle_out(input, input.color, 1.0);
+        "#
+    }
+}
+
+impl FluidParticle {
     /// Just to pad the buffers
     pub fn inert() -> Self {
         Self {
@@ -88,6 +131,171 @@ impl FluidParticle {
             ..Default::default()
         }
     }
+}
+
+/// column major 3x3 (with 16 byte padding)
+pub type WgslMat3 = [[f32; 4]; 3];
+
+fn wgsl_mat3_identity() -> WgslMat3 {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ]
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MpmFluidParticle {
+    pub deformation_gradient: WgslMat3,
+    pub b: WgslMat3,
+    pub position: [f32; 3],
+    _pad0: f32,
+    pub velocity: [f32; 3],
+    /// computed similar to sph (sum w_i * m_i)
+    pub rest_density: f32,
+    pub mass: f32,
+    _pad1: [f32; 3],
+}
+
+impl Default for MpmFluidParticle {
+    fn default() -> Self {
+        Self {
+            deformation_gradient: wgsl_mat3_identity(),
+            b: [[0.0; 4]; 3],
+            position: [0.0; 3],
+            _pad0: 0.0,
+            velocity: [0.0; 3],
+            rest_density: 0.0,
+            mass: 0.0,
+            _pad1: [0.0; 3],
+        }
+    }
+}
+
+impl GpuParticle for MpmFluidParticle {
+    fn wgsl_fields() -> &'static str {
+        r#"
+        deformation_gradient: mat3x3<f32>,
+        B: mat3x3<f32>,
+        position: vec3<f32>,
+        velocity: vec3<f32>,
+        rest_density: f32,
+        mass: f32,
+        "#
+    }
+}
+
+impl RenderParticle for MpmFluidParticle {
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[wgpu::VertexAttribute {
+                offset: std::mem::offset_of!(MpmFluidParticle, position) as wgpu::BufferAddress,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x3,
+            }],
+        }
+    }
+
+    fn instance_wgsl_fields() -> &'static str {
+        r#"
+        @location(2) instance_position: vec3<f32>,
+        "#
+    }
+
+    fn vs_main_body() -> &'static str {
+        r#"
+        var out = particle_out(input, vec3<f32>(1.0, 1.0, 1.0), 1.0);
+        out.world_normal = vec3<f32>(0.0);
+        return out;
+        "#
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MpmElasticParticle {
+    pub elastic_deformation_gradient: WgslMat3,
+    pub b: WgslMat3,
+    pub position: [f32; 3],
+    _pad0: f32,
+    pub velocity: [f32; 3],
+    pub plastic_deformation_determinant: f32,
+    pub rest_volume: f32,
+    pub mass: f32,
+    _pad1: [f32; 2],
+}
+
+impl Default for MpmElasticParticle {
+    fn default() -> Self {
+        Self {
+            elastic_deformation_gradient: wgsl_mat3_identity(),
+            b: [[0.0; 4]; 3],
+            position: [0.0; 3],
+            _pad0: 0.0,
+            velocity: [0.0; 3],
+            plastic_deformation_determinant: 1.0,
+            rest_volume: 0.0,
+            mass: 0.0,
+            _pad1: [0.0; 2],
+        }
+    }
+}
+
+impl GpuParticle for MpmElasticParticle {
+    fn wgsl_fields() -> &'static str {
+        r#"
+        elastic_deformation_gradient: mat3x3<f32>,
+        B: mat3x3<f32>,
+        position: vec3<f32>,
+        velocity: vec3<f32>,
+        plastic_deformation_determinant: f32,
+        rest_volume: f32,
+        mass: f32,
+        "#
+    }
+}
+
+impl RenderParticle for MpmElasticParticle {
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[wgpu::VertexAttribute {
+                offset: std::mem::offset_of!(MpmElasticParticle, position) as wgpu::BufferAddress,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x3,
+            }],
+        }
+    }
+
+    fn instance_wgsl_fields() -> &'static str {
+        r#"
+        @location(2) instance_position: vec3<f32>,
+        "#
+    }
+
+    fn vs_main_body() -> &'static str {
+        r#"
+        var out = particle_out(input, vec3<f32>(0.85, 0.55, 0.25), 1.0);
+        out.world_normal = vec3<f32>(0.0);
+        return out;
+        "#
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MpmGridNode {
+    pub momentum_x: f32,
+    pub momentum_y: f32,
+    pub momentum_z: f32,
+    pub mass: f32,
+    pub force_x: f32,
+    pub force_y: f32,
+    pub force_z: f32,
 }
 
 /// n x n x n cube of fluid particles
@@ -113,6 +321,154 @@ pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidPart
     particles
 }
 
+fn mpm_quadratic_kernel(r: f32) -> f32 {
+    let ar = r.abs();
+    if ar < 0.5 {
+        0.75 - ar * ar
+    } else if ar < 1.5 {
+        let t = 1.5 - ar;
+        0.5 * t * t
+    } else {
+        0.0
+    }
+}
+
+/// we want to compute rest density of particles in the grid. to do this, we
+/// want the particle's neighborhood to be filled. so we construct n x n x n grid, compute density with
+/// rho = \sum_{i} w_i * m_i (where we sum over grid nodes). we take rho of the center particle in the grid
+/// to be the representative rest density (since its neighborhood is full)
+pub fn mpm_lattice_rest_density(spacing: f32, mass: f32, dx: f32) -> f32 {
+    let n = 7usize;
+    let origin = 0.0;
+    let mut grid: std::collections::HashMap<(i32, i32, i32), f32> =
+        std::collections::HashMap::new();
+    let mut positions = Vec::with_capacity(n * n * n);
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..n {
+                positions.push([
+                    origin + i as f32 * spacing,
+                    origin + j as f32 * spacing,
+                    origin + k as f32 * spacing,
+                ]);
+            }
+        }
+    }
+    for p in &positions {
+        let base_x = ((p[0] / dx) - 0.5).floor() as i32;
+        let base_y = ((p[1] / dx) - 0.5).floor() as i32;
+        let base_z = ((p[2] / dx) - 0.5).floor() as i32;
+        for di in 0..3 {
+            for dj in 0..3 {
+                for dk in 0..3 {
+                    let cx = base_x + di;
+                    let cy = base_y + dj;
+                    let cz = base_z + dk;
+                    let rx = (cx as f32 * dx - p[0]) / dx;
+                    let ry = (cy as f32 * dx - p[1]) / dx;
+                    let rz = (cz as f32 * dx - p[2]) / dx;
+                    let w = mpm_quadratic_kernel(rx)
+                        * mpm_quadratic_kernel(ry)
+                        * mpm_quadratic_kernel(rz);
+                    *grid.entry((cx, cy, cz)).or_insert(0.0) += w * mass;
+                }
+            }
+        }
+    }
+    let p = positions[n * n * n / 2];
+    let base_x = ((p[0] / dx) - 0.5).floor() as i32;
+    let base_y = ((p[1] / dx) - 0.5).floor() as i32;
+    let base_z = ((p[2] / dx) - 0.5).floor() as i32;
+    let mut density = 0.0;
+    for di in 0..3 {
+        for dj in 0..3 {
+            for dk in 0..3 {
+                let cx = base_x + di;
+                let cy = base_y + dj;
+                let cz = base_z + dk;
+                let rx = (cx as f32 * dx - p[0]) / dx;
+                let ry = (cy as f32 * dx - p[1]) / dx;
+                let rz = (cz as f32 * dx - p[2]) / dx;
+                let w = mpm_quadratic_kernel(rx)
+                    * mpm_quadratic_kernel(ry)
+                    * mpm_quadratic_kernel(rz);
+                density += grid.get(&(cx, cy, cz)).copied().unwrap_or(0.0) * w;
+            }
+        }
+    }
+    density
+}
+
+pub fn mpm_lattice_rest_volume(spacing: f32, mass: f32, dx: f32) -> f32 {
+    let density = mpm_lattice_rest_density(spacing, mass, dx);
+    (mass / density) * dx * dx * dx
+}
+
+pub fn mpm_fluid_block(
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    spacing: f32,
+    origin: Vector3<f32>,
+) -> Vec<MpmFluidParticle> {
+    let rest_volume = spacing * spacing * spacing;
+    let density = 1000.0;
+    let mass = density * rest_volume;
+    let rest_density = mpm_lattice_rest_density(spacing, mass, mpm::MPM_DX);
+    let mut particles = Vec::with_capacity(nx * ny * nz);
+    for i in 0..nx {
+        for j in 0..ny {
+            for k in 0..nz {
+                particles.push(MpmFluidParticle {
+                    deformation_gradient: wgsl_mat3_identity(),
+                    b: [[0.0; 4]; 3],
+                    position: [
+                        origin.x + i as f32 * spacing,
+                        origin.y + j as f32 * spacing,
+                        origin.z + k as f32 * spacing,
+                    ],
+                    rest_density,
+                    mass,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    particles
+}
+
+pub fn mpm_elastic_block(
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    spacing: f32,
+    origin: Vector3<f32>,
+) -> Vec<MpmElasticParticle> {
+    let material_density = 400.0;
+    let mass = material_density * spacing * spacing * spacing;
+    let rest_volume = mpm_lattice_rest_volume(spacing, mass, mpm::MPM_DX);
+    let mut particles = Vec::with_capacity(nx * ny * nz);
+    for i in 0..nx {
+        for j in 0..ny {
+            for k in 0..nz {
+                particles.push(MpmElasticParticle {
+                    elastic_deformation_gradient: wgsl_mat3_identity(),
+                    b: [[0.0; 4]; 3],
+                    position: [
+                        origin.x + i as f32 * spacing,
+                        origin.y + j as f32 * spacing,
+                        origin.z + k as f32 * spacing,
+                    ],
+                    plastic_deformation_determinant: 1.0,
+                    rest_volume,
+                    mass,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    particles
+}
 
 pub fn lattice_rest_density(spacing: f32, mass: f32, kernel: &CubicKernel) -> f32 {
     let reach = (kernel.h / spacing).ceil() as i32;
@@ -130,7 +486,7 @@ pub fn lattice_rest_density(spacing: f32, mass: f32, kernel: &CubicKernel) -> f3
 
 /// all particles given the same rest density (and initial density as well):
 /// helped stabilize sim since boundary fluid particles naturally are less densed,
-/// which was causing all sorts of problems 
+/// which was causing all sorts of problems
 pub fn assign_rest_densities(
     particles: &mut [FluidParticle],
     boundary_particles: &mut [FluidParticle],
@@ -148,30 +504,6 @@ pub fn assign_rest_densities(
         p.rest_density = rest_density;
         p.density = rest_density;
     }
-}
-
-pub fn neighbor_sum<F, T>(delta: F, neighbors: &[usize], zero: T) -> T
-where
-    F: Fn(usize) -> T,
-    T: Add<Output = T>,
-{
-    let mut sum = zero;
-    for &neighbor_idx in neighbors {
-        sum = sum + delta(neighbor_idx);
-    }
-    sum
-}
-
-pub fn precompute_neighbors(positions: &[Vector3<f32>], kernel: &CubicKernel) -> Vec<Vec<usize>> {
-    let mut neighbors = vec![Vec::new(); positions.len()];
-    for i in 0..positions.len() {
-        for j in 0..positions.len() {
-            if (positions[i] - positions[j]).norm() <= kernel.h {
-                neighbors[i].push(j);
-            }
-        }
-    }
-    neighbors
 }
 
 #[derive(Debug, Clone)]
@@ -193,49 +525,5 @@ impl CubicKernel {
         } else {
             0.0
         }
-    }
-}
-
-/// Eq (11) in https://arxiv.org/pdf/2009.06944
-pub fn compute_densities(
-    vertices: &[PhysicsVertex],
-    kernel: &CubicKernel,
-    neighbors: &[Vec<usize>],
-) -> Vec<f32> {
-    let mut densities = vec![0.0; vertices.len()];
-    for i in 0..vertices.len() {
-        let density = neighbor_sum(
-            |j| {
-                let r = vertices[i].position - vertices[j].position;
-                vertices[j].mass * kernel.weight(r.norm())
-            },
-            &neighbors[i],
-            0.0,
-        );
-        densities[i] = density;
-    }
-    densities
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cubic_kernel() {
-        let kernel = CubicKernel::new(1.0);
-        let x_i = vec![Vector3::new(0.0, 0.0, 0.0)];
-        let x_j = vec![Vector3::new(1.0, 0.0, 0.0)];
-        let neighbors = precompute_neighbors(&x_j, &kernel);
-        let w = kernel.weight((x_i[0] - x_j[0]).norm());
-        assert_eq!(neighbors.len(), 1);
-        assert_eq!(w, 0.0);
-    }
-
-    #[test]
-    fn test_neighbor_sum() {
-        let neighbors = vec![1, 3, 5];
-        let sum = neighbor_sum(|idx| idx, &neighbors, 0);
-        assert_eq!(sum, 9);
     }
 }

@@ -1,6 +1,16 @@
-use crate::physics::{FluidParticle, PrefixSum};
+use crate::physics::{FluidParticle, GpuParticle, PrefixSum};
 use crate::texture::Texture;
+use std::borrow::Cow;
+use std::marker::PhantomData;
 use wgpu::util::DeviceExt;
+
+fn ssfr_particle_shader<P: GpuParticle>(device: &wgpu::Device) -> wgpu::ShaderModule {
+    let src = include_str!("fluid_depth.wgsl").replace("${PARTICLE_FIELDS}", P::wgsl_fields());
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("ssfr particle depth/thickness"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Owned(src)),
+    })
+}
 /// After SPH sim, the particles buffer contains a mix of
 /// boundary and fluid particles. this performs compaction
 /// to get a buffer with just fluid particles
@@ -206,13 +216,13 @@ struct FluidDepth {
 }
 
 impl FluidDepth {
-    pub fn new(
+    pub fn new<P: GpuParticle>(
         device: &wgpu::Device,
         uniform_bind_group_layout: &wgpu::BindGroupLayout,
         extend_width: u32,
         extend_height: u32,
     ) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("fluid_depth.wgsl"));
+        let module = ssfr_particle_shader::<P>(device);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fluid_depth"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -364,14 +374,14 @@ struct FluidThickness {
 }
 
 impl FluidThickness {
-    pub fn new(
+    pub fn new<P: GpuParticle>(
         device: &wgpu::Device,
-        uniform_bind_group_layout: wgpu::BindGroupLayout,
+        uniform_bind_group_layout: &wgpu::BindGroupLayout,
         extent_width: u32,
         extent_height: u32,
     ) -> Self {
         // TODO: can pull out commonalities with Fluid Depth pipeline
-        let module = device.create_shader_module(wgpu::include_wgsl!("fluid_depth.wgsl"));
+        let module = ssfr_particle_shader::<P>(device);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fluid_thickness"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -387,7 +397,7 @@ impl FluidThickness {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Fluid thickness calculation"),
-            bind_group_layouts: &[Some(&uniform_bind_group_layout), Some(&layout)],
+            bind_group_layouts: &[Some(uniform_bind_group_layout), Some(&layout)],
             immediate_size: 0,
         });
         let fluid_thickness_pipeline =
@@ -397,7 +407,7 @@ impl FluidThickness {
                 vertex: wgpu::VertexState {
                     module: &module,
                     entry_point: Some("vertex_main"),
-                    buffers: &[], // no buffers needed since we use sph buffer
+                    buffers: &[],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -405,7 +415,6 @@ impl FluidThickness {
                     entry_point: Some("frag_thickness"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::R16Float,
-                        //::ADDITIVE is not being found for some reason so explicit definition
                         blend: Some(wgpu::BlendState {
                             color: wgpu::BlendComponent {
                                 src_factor: wgpu::BlendFactor::One,
@@ -911,49 +920,55 @@ impl DepthViz {
 
 /// Perform screen-space fluid rendering
 /// see https://wstahw.win.tue.nl/edu/2IV06/andrei/particle_rendering/provided/p91-van_der_laan.pdf
-pub struct ScreenSpaceRendering {
-    compaction: FluidCompaction,
+pub struct ScreenSpaceRendering<P: GpuParticle> {
+    compaction: Option<FluidCompaction>,
     depth: FluidDepth,
     thickness: FluidThickness,
     smoothing: CurvatureFlow,
     depth_viz: DepthViz,
-    n_fluid: u32,
+    n_draw: u32,
+    _marker: PhantomData<P>,
 }
 
-impl ScreenSpaceRendering {
+impl<P: GpuParticle> ScreenSpaceRendering<P> {
     pub fn new(
         device: &wgpu::Device,
-        uniform_bind_group_layout: wgpu::BindGroupLayout,
+        uniform_bind_group_layout: &wgpu::BindGroupLayout,
         nparticles: u32,
-        n_fluid: u32,
+        n_draw: u32,
         surface_format: wgpu::TextureFormat,
         extent_width: u32,
         extent_height: u32,
         focal_x: f32,
         focal_y: f32,
     ) -> Self {
+        let compaction = if P::ssfr_needs_compaction() {
+            Some(FluidCompaction::new(device, nparticles))
+        } else {
+            None
+        };
         Self {
-            compaction: FluidCompaction::new(device, nparticles),
-            depth: FluidDepth::new(
+            compaction,
+            depth: FluidDepth::new::<P>(
                 device,
-                &uniform_bind_group_layout,
+                uniform_bind_group_layout,
                 extent_width,
                 extent_height,
             ),
-            depth_viz: DepthViz::new(device, surface_format, &uniform_bind_group_layout),
-            thickness: FluidThickness::new(
+            depth_viz: DepthViz::new(device, surface_format, uniform_bind_group_layout),
+            thickness: FluidThickness::new::<P>(
                 device,
                 uniform_bind_group_layout,
                 extent_width,
                 extent_height,
             ),
             smoothing: CurvatureFlow::new(device, extent_width, extent_height, focal_x, focal_y),
-            n_fluid,
+            n_draw,
+            _marker: PhantomData,
         }
     }
 
-    /// performs fluid compaction (i.e. filter boundary particles out of the SPH buffer).
-    /// make sure to use same encoder. this should be called before using draw()
+    /// create depth / thickness maps. optionally, if needed, performs compaction first
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -961,21 +976,20 @@ impl ScreenSpaceRendering {
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &wgpu::BindGroup,
     ) {
-        self.compaction.compact(device, particles, encoder);
-        self.thickness.draw(
-            device,
-            encoder,
-            self.compaction.get_compact_fluids_buffer(),
-            self.n_fluid,
-            uniforms,
-        );
-        self.depth.draw(
-            device,
-            encoder,
-            self.compaction.get_compact_fluids_buffer(),
-            self.n_fluid,
-            uniforms,
-        );
+        let draw_count = self.n_draw;
+        if let Some(compaction) = &self.compaction {
+            compaction.compact(device, particles, encoder);
+            let compact = compaction.get_compact_fluids_buffer();
+            self.thickness
+                .draw(device, encoder, compact, draw_count, uniforms);
+            self.depth
+                .draw(device, encoder, compact, draw_count, uniforms);
+        } else {
+            self.thickness
+                .draw(device, encoder, particles, draw_count, uniforms);
+            self.depth
+                .draw(device, encoder, particles, draw_count, uniforms);
+        }
         self.smoothing
             .smooth(device, &self.depth.eye_depth_texture, encoder);
     }

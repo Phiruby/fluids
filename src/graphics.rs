@@ -6,7 +6,9 @@ mod pipelines;
 mod ssfr;
 use flume::bounded;
 pub use marching_cubes::MarchingCubes;
-pub use pipelines::{MarchingCubesRenderPipeline, RenderPipeline, WireframeBoxPipeline};
+pub use pipelines::{
+    MarchingCubesRenderPipeline, RenderPipeline, WireframeBox, WireframeBoxPipeline,
+};
 pub use ssfr::ScreenSpaceRendering;
 use std::fmt::Debug;
 

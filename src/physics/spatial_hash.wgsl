@@ -26,8 +26,8 @@ const WG_SIZE: u32 = 256u;
 const CELL_SIZE: f32 = 0.1;
 const HASHTABLE_SIZE: u32 = 8192u;
 
-// Use floor→i32 so negative world coords (this scene is largely in -x/-z)
-// don't all collapse into cell 0 via u32(negative) clamping.
+// negative world coords (this scene is largely in -x/-z)
+// don't all collapse into cell 0 via u32(negative) clamping
 fn cell_index(position: vec3<f32>) -> vec3<i32> {
     return vec3<i32>(
         i32(floor(position.x / CELL_SIZE)),
@@ -37,7 +37,7 @@ fn cell_index(position: vec3<f32>) -> vec3<i32> {
 }
 
 fn hash_cell(cell_id: vec3<i32>) -> u32 {
-    // u32(i32) wraps negatives; % keeps them in-range for the table.
+    // u32(i32) wraps negatives; % keeps them in-range for the table
     let x = u32(cell_id.x);
     let y = u32(cell_id.y);
     let z = u32(cell_id.z);

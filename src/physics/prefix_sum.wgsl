@@ -1,9 +1,10 @@
 @group(0) @binding(0) var<storage, read> input: array<u32>;
 @group(0) @binding(1) var<storage, read_write> prefix_sums: array<u32>;
 @group(0) @binding(2) var<storage, read_write> sums: array<u32>;
-
-const n: u32 = 512; // elements per workgroup
-const nlevels: u32 = 9; // log2(n)
+// elements per workgroup
+const n: u32 = 512;
+// log2(n): num levels in the tree
+const nlevels: u32 = 9;
 var<workgroup> temp: array<u32, 532>;
 
 // input: input array

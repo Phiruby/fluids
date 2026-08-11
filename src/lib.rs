@@ -4,15 +4,24 @@ mod physics;
 mod texture;
 use crate::camera::CameraController;
 use crate::graphics::{
-    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, ScreenSpaceRendering,
+    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, ScreenSpaceRendering, WireframeBox,
     WireframeBoxPipeline,
 };
 use crate::physics::{
-    ContainerBoundary, CubicKernel, FluidParticle, FluidSim, assign_rest_densities, fluid_cube,
+    ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmElasticParticle, MpmFluidParticle,
+    MpmFluidSim, assign_rest_densities, fluid_cube, mpm_collider_bounds, mpm_elastic_block,
+    mpm_fluid_block, mpm_grid_bounds,
 };
 use crate::texture::Texture;
+use bytemuck;
+use cgmath::SquareMatrix;
+use nalgebra::Vector3;
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
+#[cfg(target_arch = "wasm32")]
+use winit::platform::web::EventLoopExtWebSys;
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -21,31 +30,45 @@ use winit::{
     window::Window,
 };
 
-use bytemuck;
-use cgmath::SquareMatrix;
-use nalgebra::Vector3;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
-#[cfg(target_arch = "wasm32")]
-use winit::platform::web::EventLoopExtWebSys;
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FluidRenderMode {
     Particles,
     MarchingCubes,
     ScreenSpaceFluidRendering,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SimBackend {
+    Sph,
+    Mpm,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MpmMaterial {
+    Fluid,
+    Elastic,
+}
+
+const SIM_BACKEND: SimBackend = SimBackend::Mpm;
 // marching cubes slow and bad :(
 const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRendering;
+const MPM_MATERIAL: MpmMaterial = MpmMaterial::Fluid;
 
 const FLUID_GRID_N: usize = 30;
 const FLUID_SPACING: f32 = 0.03;
 const FLUID_PARTICLE_RADIUS: f32 = 0.020;
-const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.12, -0.7];
+const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.50, -0.7];
 const FLUID_CELL_SIZE: f32 = 0.1;
 const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
+
+const MPM_BLOCK_N: usize = 32;
+const MPM_SPACING: f32 = 0.01;
+const MPM_ORIGIN: [f32; 3] = [0.16, 0.28, 0.16];
+const MPM_ELASTIC_BLOCK_N: usize = 16;
+const MPM_ELASTIC_ORIGIN: [f32; 3] = [0.16, 0.28, 0.16];
+const MPM_PARTICLE_RADIUS: f32 = 0.01;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
 const CONTAINER_MAX: [f32; 3] = [0.1, 1.85, 0.8];
@@ -70,10 +93,11 @@ pub(crate) struct Camera {
 impl Camera {
     fn build_view_projection_matrix(&self) -> (cgmath::Matrix4<f32>, cgmath::Matrix4<f32>) {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
-        let projection =
-            cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
-        return (OPENGL_TO_WGPU_MATRIX * projection, view);
+        let projection = OPENGL_TO_WGPU_MATRIX
+            * cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
+        (projection, view)
     }
+
     fn focal_lengths(&self) -> (f32, f32) {
         let focal_y = 1.0 / (self.fovy.to_radians() * 0.5).tan();
         let focal_x = focal_y / self.aspect;
@@ -87,10 +111,16 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
     window: Arc<Window>,
-    container_pipeline: WireframeBoxPipeline,
-    fluid_pipeline: RenderPipeline,
+    wireframe_pipeline: WireframeBoxPipeline,
+    sph_wireframe: WireframeBox,
+    mpm_wireframe: WireframeBox,
+    mpm_collider_wireframe: WireframeBox,
+    fluid_pipeline: RenderPipeline<FluidParticle>,
+    mpm_pipeline: RenderPipeline<MpmFluidParticle>,
+    mpm_elastic_pipeline: RenderPipeline<MpmElasticParticle>,
     marching_cubes: MarchingCubes,
-    screen_space_rendering: ScreenSpaceRendering,
+    sph_screen_space: ScreenSpaceRendering<FluidParticle>,
+    mpm_screen_space: ScreenSpaceRendering<MpmFluidParticle>,
     mc_pipeline: MarchingCubesRenderPipeline,
     camera: Camera,
     camera_controller: CameraController,
@@ -101,6 +131,7 @@ pub struct State {
     camera_buffer: wgpu::Buffer,
     depth_texture: Texture,
     fluid_sim: FluidSim,
+    mpm_fluid_sim: MpmFluidSim,
 }
 
 #[repr(C)]
@@ -197,18 +228,45 @@ impl State {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        let camera = Camera {
-            eye: (-0.4, 1.4, 3.2).into(),
-            target: (-0.55, 0.55, -0.1).into(),
-            up: (0.0, 1.0, 0.0).into(),
-            aspect: config.width as f32 / config.height as f32,
-            fovy: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
+        let (mpm_min, mpm_max) = mpm_grid_bounds();
+        let mpm_center = [
+            0.5 * (mpm_min[0] + mpm_max[0]),
+            0.5 * (mpm_min[1] + mpm_max[1]),
+            0.5 * (mpm_min[2] + mpm_max[2]),
+        ];
+
+        let camera = if SIM_BACKEND == SimBackend::Mpm {
+            Camera {
+                eye: (
+                    mpm_center[0] + 1.4,
+                    mpm_center[1] + 1.0,
+                    mpm_center[2] + 1.8,
+                )
+                    .into(),
+                target: (mpm_center[0], mpm_center[1], mpm_center[2]).into(),
+                up: (0.0, 1.0, 0.0).into(),
+                aspect: config.width as f32 / config.height as f32,
+                fovy: 45.0,
+                znear: 0.1,
+                zfar: 100.0,
+            }
+        } else {
+            Camera {
+                eye: (-0.4, 1.4, 3.2).into(),
+                target: (-0.55, 0.55, -0.1).into(),
+                up: (0.0, 1.0, 0.0).into(),
+                aspect: config.width as f32 / config.height as f32,
+                fovy: 45.0,
+                znear: 0.1,
+                zfar: 100.0,
+            }
         };
 
         let mut camera_uniform = CameraUniform::new();
-        camera_uniform.particle_radius = FLUID_PARTICLE_RADIUS;
+        camera_uniform.particle_radius = match SIM_BACKEND {
+            SimBackend::Sph => FLUID_PARTICLE_RADIUS,
+            SimBackend::Mpm => MPM_PARTICLE_RADIUS,
+        };
         camera_uniform.screen_height = config.height as f32;
         camera_uniform.update_view_projection(&camera);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -241,13 +299,15 @@ impl State {
 
         let depth_texture =
             Texture::create_depth_texture(&device, config.width, config.height, "Depth texture");
-        let container_pipeline = WireframeBoxPipeline::new(
-            &device,
-            &camera_bind_group_layout,
-            config.format,
-            CONTAINER_MIN,
-            CONTAINER_MAX,
-        );
+        let wireframe_pipeline =
+            WireframeBoxPipeline::new(&device, &camera_bind_group_layout, config.format);
+        let sph_wireframe =
+            WireframeBox::new(&device, CONTAINER_MIN, CONTAINER_MAX, [0.25, 0.95, 0.35]);
+        let (mpm_min, mpm_max) = mpm_grid_bounds();
+        let mpm_wireframe = WireframeBox::new(&device, mpm_min, mpm_max, [0.95, 0.55, 0.2]);
+        let (col_min, col_max) = mpm_collider_bounds();
+        let mpm_collider_wireframe =
+            WireframeBox::new(&device, col_min, col_max, [0.35, 0.85, 1.0]);
 
         let mut fluid_particles =
             fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
@@ -274,22 +334,72 @@ impl State {
         fluid_particles.resize(padded_len, FluidParticle::inert());
 
         let fluid_sim = FluidSim::new(&device, &fluid_particles);
+        let (mpm_particles, mpm_elastic_particles) = match MPM_MATERIAL {
+            MpmMaterial::Fluid => (
+                mpm_fluid_block(
+                    MPM_BLOCK_N,
+                    MPM_BLOCK_N,
+                    MPM_BLOCK_N,
+                    MPM_SPACING,
+                    Vector3::from(MPM_ORIGIN),
+                ),
+                Vec::new(),
+            ),
+            MpmMaterial::Elastic => (
+                Vec::new(),
+                mpm_elastic_block(
+                    MPM_ELASTIC_BLOCK_N,
+                    MPM_ELASTIC_BLOCK_N,
+                    MPM_ELASTIC_BLOCK_N,
+                    MPM_SPACING,
+                    Vector3::from(MPM_ELASTIC_ORIGIN),
+                ),
+            ),
+        };
+        let mpm_fluid_sim = MpmFluidSim::new(&device, &mpm_particles, &mpm_elastic_particles);
         let fluid_pipeline = RenderPipeline::new(
             &device,
             &camera_bind_group_layout,
             config.format,
             FLUID_PARTICLE_RADIUS,
         );
+        let mpm_pipeline = RenderPipeline::new(
+            &device,
+            &camera_bind_group_layout,
+            config.format,
+            MPM_PARTICLE_RADIUS,
+        );
+        let mpm_elastic_pipeline = RenderPipeline::new(
+            &device,
+            &camera_bind_group_layout,
+            config.format,
+            MPM_PARTICLE_RADIUS,
+        );
         let marching_cubes = MarchingCubes::new(&device);
         let mc_pipeline =
             MarchingCubesRenderPipeline::new(&device, &camera_bind_group_layout, config.format);
         // TODO: needs to be updated on screen resize
         let (focal_x, focal_y) = camera.focal_lengths();
-        let screen_space_rendering = ScreenSpaceRendering::new(
+        let sph_screen_space = ScreenSpaceRendering::new(
             &device,
-            camera_bind_group_layout,
+            &camera_bind_group_layout,
             fluid_particles.len() as u32,
             n_fluid,
+            config.format,
+            size.width,
+            size.height,
+            focal_x,
+            focal_y,
+        );
+        let mpm_particle_count = match MPM_MATERIAL {
+            MpmMaterial::Fluid => mpm_particles.len() as u32,
+            MpmMaterial::Elastic => 0,
+        };
+        let mpm_screen_space = ScreenSpaceRendering::new(
+            &device,
+            &camera_bind_group_layout,
+            mpm_particle_count.max(1),
+            mpm_particle_count,
             config.format,
             size.width,
             size.height,
@@ -303,8 +413,13 @@ impl State {
             config,
             is_surface_configured: false,
             window,
-            container_pipeline,
+            wireframe_pipeline,
+            sph_wireframe,
+            mpm_wireframe,
+            mpm_collider_wireframe,
             fluid_pipeline,
+            mpm_pipeline,
+            mpm_elastic_pipeline,
             marching_cubes,
             mc_pipeline,
             camera,
@@ -314,7 +429,9 @@ impl State {
             camera_uniform,
             depth_texture,
             fluid_sim,
-            screen_space_rendering,
+            mpm_fluid_sim,
+            sph_screen_space,
+            mpm_screen_space,
         })
     }
 
@@ -367,9 +484,16 @@ impl State {
                 label: Some("Command encoder for rendering"),
             });
 
-        self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
+        match SIM_BACKEND {
+            SimBackend::Sph => {
+                self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
+            }
+            SimBackend::Mpm => {
+                self.mpm_fluid_sim.step(&self.device, &mut encoder);
+            }
+        }
 
-        if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
+        if SIM_BACKEND == SimBackend::Sph && FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
             self.marching_cubes.extract(
                 &self.device,
                 &mut encoder,
@@ -378,11 +502,25 @@ impl State {
             );
         }
 
-        if FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering {
+        if SIM_BACKEND == SimBackend::Sph
+            && FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering
+        {
             // perform compaction (filter out boundary particles) b4 creating render pass
-            self.screen_space_rendering.prepare(
+            self.sph_screen_space.prepare(
                 &self.device,
                 self.fluid_sim.particle_buffer(),
+                &mut encoder,
+                &self.camera_bind_group,
+            );
+        }
+
+        if SIM_BACKEND == SimBackend::Mpm
+            && FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering
+            && MPM_MATERIAL == MpmMaterial::Fluid
+        {
+            self.mpm_screen_space.prepare(
+                &self.device,
+                self.mpm_fluid_sim.particle_buffer(),
                 &mut encoder,
                 &self.camera_bind_group,
             );
@@ -418,33 +556,88 @@ impl State {
                 multiview_mask: None,
             });
 
-            match FLUID_RENDER_MODE {
-                FluidRenderMode::Particles => {
-                    self.fluid_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        self.fluid_sim.particle_buffer(),
-                        self.fluid_sim.num_particles(),
-                    );
-                }
-                FluidRenderMode::MarchingCubes => {
-                    self.mc_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        self.marching_cubes.vertex_buffer(),
-                        self.marching_cubes.index_buffer(),
-                        self.marching_cubes.indirect_buffer(),
-                    );
-                }
-                FluidRenderMode::ScreenSpaceFluidRendering => self.screen_space_rendering.draw(
-                    &self.device,
-                    &mut render_pass,
-                    &self.camera_bind_group,
-                ),
+            match SIM_BACKEND {
+                SimBackend::Sph => match FLUID_RENDER_MODE {
+                    FluidRenderMode::Particles => {
+                        self.fluid_pipeline.draw(
+                            &mut render_pass,
+                            &self.camera_bind_group,
+                            self.fluid_sim.particle_buffer(),
+                            self.fluid_sim.num_particles(),
+                        );
+                    }
+                    FluidRenderMode::MarchingCubes => {
+                        self.mc_pipeline.draw(
+                            &mut render_pass,
+                            &self.camera_bind_group,
+                            self.marching_cubes.vertex_buffer(),
+                            self.marching_cubes.index_buffer(),
+                            self.marching_cubes.indirect_buffer(),
+                        );
+                    }
+                    FluidRenderMode::ScreenSpaceFluidRendering => {
+                        self.sph_screen_space.draw(
+                            &self.device,
+                            &mut render_pass,
+                            &self.camera_bind_group,
+                        );
+                    }
+                },
+                SimBackend::Mpm => match FLUID_RENDER_MODE {
+                    FluidRenderMode::Particles => match MPM_MATERIAL {
+                        MpmMaterial::Fluid => {
+                            self.mpm_pipeline.draw(
+                                &mut render_pass,
+                                &self.camera_bind_group,
+                                self.mpm_fluid_sim.particle_buffer(),
+                                self.mpm_fluid_sim.num_particles(),
+                            );
+                        }
+                        MpmMaterial::Elastic => {
+                            self.mpm_elastic_pipeline.draw(
+                                &mut render_pass,
+                                &self.camera_bind_group,
+                                self.mpm_fluid_sim.elastic_particle_buffer(),
+                                self.mpm_fluid_sim.num_elastic_particles(),
+                            );
+                        }
+                    },
+                    FluidRenderMode::ScreenSpaceFluidRendering => {
+                        assert!(
+                            MPM_MATERIAL == MpmMaterial::Fluid,
+                            "SSFR is only for MPM fluid particles"
+                        );
+                        self.mpm_screen_space.draw(
+                            &self.device,
+                            &mut render_pass,
+                            &self.camera_bind_group,
+                        );
+                    }
+                    _ => panic!("Mpm does not support this render mode"),
+                },
             }
 
-            self.container_pipeline
-                .draw(&mut render_pass, &self.camera_bind_group);
+            match SIM_BACKEND {
+                SimBackend::Sph => {
+                    self.wireframe_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        &self.sph_wireframe,
+                    );
+                }
+                SimBackend::Mpm => {
+                    self.wireframe_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        &self.mpm_wireframe,
+                    );
+                    self.wireframe_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        &self.mpm_collider_wireframe,
+                    );
+                }
+            }
         }
 
         self.queue.submit([encoder.finish()]);
@@ -496,6 +689,7 @@ impl State {
         self.camera_controller
             .process_cursor_moved(position, &mut self.camera);
     }
+
 
     fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
