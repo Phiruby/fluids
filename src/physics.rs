@@ -14,6 +14,10 @@ pub const FLUID_COLOR: [f32; 3] = [0.2, 0.5, 0.95];
 pub trait GpuParticle {
     /// this should return fields as used in wgsl
     fn wgsl_fields() -> &'static str;
+    /// if true, particles will be compacted before drawing (for ssfr)
+    fn ssfr_needs_compaction() -> bool {
+        false
+    }
 }
 
 /// for particles that can be drawn with the instanced cube pipeline
@@ -67,6 +71,10 @@ impl GpuParticle for FluidParticle {
         cell_hash: u32,
         boundary: u32,
         "#
+    }
+
+    fn ssfr_needs_compaction() -> bool {
+        true
     }
 }
 

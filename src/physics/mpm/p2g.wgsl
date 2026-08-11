@@ -33,7 +33,7 @@ const DX: f32 = 0.02;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const N: u32 = 32u;
 const D_INV = 4.0 / (DX * DX);
-const EOS_STIFFNESS = 10000.0;
+const EOS_STIFFNESS = 100000.0;
 const EOS_POWER = 7.0;
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
@@ -282,9 +282,9 @@ fn fluid_particles_to_grid_stress(@builtin(global_invocation_id) id: vec3<u32>) 
         0.0, -pressure, 0.0,
         0.0, 0.0, -pressure,
     );
-    var velocity_gradient: mat3x3<f32> = D_INV * p.B;
-    velocity_gradient = velocity_gradient + transpose(velocity_gradient);
-    stress += 0.9 * velocity_gradient;
+    // var velocity_gradient: mat3x3<f32> = D_INV * p.B;
+    // velocity_gradient = velocity_gradient + transpose(velocity_gradient);
+    // stress += 0.9 * velocity_gradient;
 
     push_to_grid(p.position, volume, stress);
 }

@@ -1,4 +1,3 @@
-
 struct CameraUniform {
     view: mat4x4<f32>,
     projection: mat4x4<f32>,
@@ -9,15 +8,7 @@ struct CameraUniform {
 }
 
 struct Particle {
-    position: vec3<f32>,
-    velocity: vec3<f32>,
-    normal: vec3<f32>,
-    density: f32,
-    rest_density: f32,
-    mass: f32,
-    cell_hash: u32,
-    // 1 = fluid, 0 = boundary
-    boundary: u32,
+    ${PARTICLE_FIELDS}
 }
 
 @group(0) @binding(0)
