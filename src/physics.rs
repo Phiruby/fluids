@@ -207,6 +207,78 @@ impl RenderParticle for MpmFluidParticle {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MpmElasticParticle {
+    pub elastic_deformation_gradient: WgslMat3,
+    pub b: WgslMat3,
+    pub position: [f32; 3],
+    _pad0: f32,
+    pub velocity: [f32; 3],
+    pub plastic_deformation_determinant: f32,
+    pub rest_volume: f32,
+    pub mass: f32,
+    _pad1: [f32; 3],
+}
+
+impl Default for MpmElasticParticle {
+    fn default() -> Self {
+        Self {
+            elastic_deformation_gradient: wgsl_mat3_identity(),
+            b: [[0.0; 4]; 3],
+            position: [0.0; 3],
+            _pad0: 0.0,
+            velocity: [0.0; 3],
+            plastic_deformation_determinant: 1.0,
+            rest_volume: 0.0,
+            mass: 0.0,
+            _pad1: [0.0; 3],
+        }
+    }
+}
+
+impl GpuParticle for MpmElasticParticle {
+    fn wgsl_fields() -> &'static str {
+        r#"
+        plastic_deformation_gradient: mat3x3<f32>,
+        B: mat3x3<f32>,
+        position: vec3<f32>,
+        velocity: vec3<f32>,
+        plastic_deformation_determinant: f32,
+        rest_volume: f32,
+        mass: f32,
+        "#
+    }
+}
+
+impl RenderParticle for MpmElasticParticle {
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[wgpu::VertexAttribute {
+                offset: std::mem::offset_of!(MpmFluidParticle, position) as wgpu::BufferAddress,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x3,
+            }],
+        }
+    }
+
+    fn instance_wgsl_fields() -> &'static str {
+        r#"
+        @location(2) instance_position: vec3<f32>,
+        "#
+    }
+
+    fn vs_main_body() -> &'static str {
+        r#"
+        var out = particle_out(input, vec3<f32>(1.0, 1.0, 1.0), 1.0);
+        out.world_normal = vec3<f32>(0.0);
+        return out;
+        "#
+    }
+}
+
+#[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MpmGridNode {
     pub momentum_x: f32,
@@ -239,10 +311,6 @@ pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidPart
         }
     }
     particles
-}
-
-pub fn mpm_fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<MpmFluidParticle> {
-    mpm_fluid_block(n, n, spacing, origin)
 }
 
 fn mpm_quadratic_kernel(r: f32) -> f32 {

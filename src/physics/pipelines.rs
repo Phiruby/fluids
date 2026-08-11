@@ -1,6 +1,7 @@
 use crate::graphics::BufferDebug;
 use crate::physics::FluidParticle;
 use crate::physics::GpuParticle;
+use regex::Regex;
 use wgpu::util::DeviceExt;
 const WG_SIZE: u32 = 256;
 const RADIX_BUCKETS: u32 = 16;
@@ -23,6 +24,35 @@ pub fn pipeline(
     })
 }
 
+#[macro_export]
+macro_rules! load_wgsl {
+    ($device:expr, $name:literal) => {{
+        fn load_file(path: &std::path::Path) -> String {
+            let source = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("failed to read {:?}: {}", path, e));
+
+            let re = regex::Regex::new(r#"#include\s*<([^>]+)>"#).unwrap();
+
+            re.replace_all(&source, |caps: &regex::Captures| {
+                let include_path = path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(&caps[1]);
+
+                load_file(&include_path)
+            })
+            .into_owned()
+        }
+
+        let path = std::path::Path::new($name);
+        let shader_string = load_file(path);
+
+        $device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some($name),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(shader_string)),
+        })
+    }};
+}
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct SortUniform {

@@ -1,6 +1,8 @@
 mod objects;
 
+use crate::load_wgsl;
 use crate::physics::{MpmFluidParticle, MpmGridNode};
+
 use wgpu::util::DeviceExt;
 
 pub use objects::mpm_collider_bounds;
@@ -242,7 +244,8 @@ struct G2P {
 
 impl G2P {
     pub fn new(device: &wgpu::Device) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("mpm/g2p.wgsl"));
+        let module = load_wgsl!(device, "src/physics/mpm/g2p.wgsl");
+        // let module = device.create_shader_module(wgpu::include_wgsl!("mpm/g2p.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("g2p"),
             entries: &[
@@ -287,7 +290,7 @@ impl G2P {
             label: Some("g2p"),
             layout: Some(&pipeline_layout),
             module: &module,
-            entry_point: Some("grid_to_particles"),
+            entry_point: Some("fluid_grid_to_particles"),
             cache: Default::default(),
             compilation_options: Default::default(),
         });
@@ -326,6 +329,13 @@ impl G2P {
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(num_particles.div_ceil(WG_SIZE), 1, 1);
     }
+}
+
+/// perform plastic projection: eq (79) - (86) in https://alexey.stomakhin.com/research/siggraph2016_mpm.pdf
+/// only for elastic solids; not applied to fluids
+struct PlasticProjection {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
 }
 
 pub struct MpmFluidSim {
