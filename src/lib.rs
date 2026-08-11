@@ -3,17 +3,29 @@ mod graphics;
 mod physics;
 mod texture;
 use crate::camera::CameraController;
+use crate::graphics::debug_plot::{
+    mpm_elastic_particle_metrics, mpm_one_elastic_particle_metrics, mpm_one_particle_metrics,
+    mpm_particle_metrics,
+};
 use crate::graphics::{
     BufferDebug, MarchingCubes, MarchingCubesRenderPipeline, PlotWindow, RenderPipeline,
     ScreenSpaceRendering, WireframeBox, WireframeBoxPipeline,
 };
 use crate::physics::{
-    ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmFluidParticle, MpmFluidSim,
-    assign_rest_densities, fluid_cube, mpm_collider_bounds, mpm_fluid_block, mpm_grid_bounds,
+    ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmElasticParticle, MpmFluidParticle,
+    MpmFluidSim, assign_rest_densities, fluid_cube, mpm_collider_bounds, mpm_elastic_block,
+    mpm_fluid_block, mpm_grid_bounds,
 };
 use crate::texture::Texture;
+use bytemuck;
+use cgmath::SquareMatrix;
+use nalgebra::Vector3;
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
+#[cfg(target_arch = "wasm32")]
+use winit::platform::web::EventLoopExtWebSys;
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -21,14 +33,6 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
-use crate::graphics::debug_plot::{mpm_particle_metrics, mpm_one_particle_metrics};
-use bytemuck;
-use cgmath::SquareMatrix;
-use nalgebra::Vector3;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
-#[cfg(target_arch = "wasm32")]
-use winit::platform::web::EventLoopExtWebSys;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FluidRenderMode {
@@ -43,11 +47,18 @@ enum SimBackend {
     Mpm,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MpmMaterial {
+    Fluid,
+    Elastic,
+}
+
 const SIM_BACKEND: SimBackend = SimBackend::Mpm;
 // marching cubes slow and bad :(
 const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::Particles;
 /// open plot for mpm particles
 const MPM_LIVE_PLOT: bool = true;
+const MPM_MATERIAL: MpmMaterial = MpmMaterial::Elastic;
 
 const FLUID_GRID_N: usize = 30;
 const FLUID_SPACING: f32 = 0.03;
@@ -60,8 +71,11 @@ const ISO_LEVEL_STEP: f32 = 100.0;
 
 const MPM_BLOCK_NX: usize = 50;
 const MPM_BLOCK_NY: usize = 50;
-const MPM_SPACING: f32 = 0.02;
+const MPM_SPACING: f32 = 0.01;
 const MPM_ORIGIN: [f32; 3] = [0.45, 0.40, 0.0];
+const MPM_ELASTIC_BLOCK_NX: usize = 50;
+const MPM_ELASTIC_BLOCK_NY: usize = 50;
+const MPM_ELASTIC_ORIGIN: [f32; 3] = [0.45, 0.40, 0.0];
 const MPM_PARTICLE_RADIUS: f32 = 0.003;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
@@ -110,7 +124,7 @@ impl Camera {
         (focal_x, focal_y)
     }
 
-    /// Unproject a screen pixel to the z=0 plane (MPM is 2D in XY). 
+    /// Unproject a screen pixel to the z=0 plane (MPM is 2D in XY).
     // used for selecting mpm particles for plotting
     fn screen_to_world_xy(&self, px: f64, py: f64, width: u32, height: u32) -> Option<[f32; 2]> {
         if width == 0 || height == 0 {
@@ -148,6 +162,7 @@ pub struct State {
     mpm_collider_wireframe: WireframeBox,
     fluid_pipeline: RenderPipeline<FluidParticle>,
     mpm_pipeline: RenderPipeline<MpmFluidParticle>,
+    mpm_elastic_pipeline: RenderPipeline<MpmElasticParticle>,
     marching_cubes: MarchingCubes,
     screen_space_rendering: ScreenSpaceRendering,
     mc_pipeline: MarchingCubesRenderPipeline,
@@ -367,19 +382,33 @@ impl State {
         fluid_particles.resize(padded_len, FluidParticle::inert());
 
         let fluid_sim = FluidSim::new(&device, &fluid_particles);
-        let mpm_particles = mpm_fluid_block(
-            MPM_BLOCK_NX,
-            MPM_BLOCK_NY,
-            MPM_SPACING,
-            Vector3::from(MPM_ORIGIN),
-        );
-        let mpm_fluid_sim = MpmFluidSim::new(&device, &mpm_particles);
+        let (mpm_particles, mpm_elastic_particles) = match MPM_MATERIAL {
+            MpmMaterial::Fluid => (
+                mpm_fluid_block(
+                    MPM_BLOCK_NX,
+                    MPM_BLOCK_NY,
+                    MPM_SPACING,
+                    Vector3::from(MPM_ORIGIN),
+                ),
+                Vec::new(),
+            ),
+            MpmMaterial::Elastic => (
+                Vec::new(),
+                mpm_elastic_block(
+                    MPM_ELASTIC_BLOCK_NX,
+                    MPM_ELASTIC_BLOCK_NY,
+                    MPM_SPACING,
+                    Vector3::from(MPM_ELASTIC_ORIGIN),
+                ),
+            ),
+        };
+        let mpm_fluid_sim = MpmFluidSim::new(&device, &mpm_particles, &mpm_elastic_particles);
         let mpm_debug = MPM_LIVE_PLOT.then(|| {
-            BufferDebug::with_plot(
-                &device,
-                mpm_fluid_sim.particle_buffer().size(),
-                "MPM metrics",
-            )
+            let buf = match MPM_MATERIAL {
+                MpmMaterial::Fluid => mpm_fluid_sim.particle_buffer(),
+                MpmMaterial::Elastic => mpm_fluid_sim.elastic_particle_buffer(),
+            };
+            BufferDebug::with_plot(&device, buf.size(), "MPM metrics")
         });
         let fluid_pipeline = RenderPipeline::new(
             &device,
@@ -388,6 +417,12 @@ impl State {
             FLUID_PARTICLE_RADIUS,
         );
         let mpm_pipeline = RenderPipeline::new(
+            &device,
+            &camera_bind_group_layout,
+            config.format,
+            MPM_PARTICLE_RADIUS,
+        );
+        let mpm_elastic_pipeline = RenderPipeline::new(
             &device,
             &camera_bind_group_layout,
             config.format,
@@ -422,6 +457,7 @@ impl State {
             mpm_collider_wireframe,
             fluid_pipeline,
             mpm_pipeline,
+            mpm_elastic_pipeline,
             marching_cubes,
             mc_pipeline,
             camera,
@@ -589,14 +625,24 @@ impl State {
                     }
                 },
                 SimBackend::Mpm => match FLUID_RENDER_MODE {
-                    FluidRenderMode::Particles => {
-                        self.mpm_pipeline.draw(
-                            &mut render_pass,
-                            &self.camera_bind_group,
-                            self.mpm_fluid_sim.particle_buffer(),
-                            self.mpm_fluid_sim.num_particles(),
-                        );
-                    }
+                    FluidRenderMode::Particles => match MPM_MATERIAL {
+                        MpmMaterial::Fluid => {
+                            self.mpm_pipeline.draw(
+                                &mut render_pass,
+                                &self.camera_bind_group,
+                                self.mpm_fluid_sim.particle_buffer(),
+                                self.mpm_fluid_sim.num_particles(),
+                            );
+                        }
+                        MpmMaterial::Elastic => {
+                            self.mpm_elastic_pipeline.draw(
+                                &mut render_pass,
+                                &self.camera_bind_group,
+                                self.mpm_fluid_sim.elastic_particle_buffer(),
+                                self.mpm_fluid_sim.num_elastic_particles(),
+                            );
+                        }
+                    },
                     _ => panic!("Mpm does not support rendering modes other than particles"),
                 },
             }
@@ -619,28 +665,50 @@ impl State {
         if SIM_BACKEND == SimBackend::Mpm {
             self.sim_time += 1.0 / 60.0;
             if let Some(dbg) = self.mpm_debug.as_mut() {
-                let n = self.mpm_fluid_sim.num_particles() as u64;
                 let tracked = self.tracked_particle;
                 let t = if tracked.is_some() {
                     self.sim_time - self.track_t0
                 } else {
                     self.sim_time
                 };
-                dbg.sample(
-                    &self.device,
-                    &self.queue,
-                    self.mpm_fluid_sim.particle_buffer(),
-                    n,
-                    t,
-                    |ps: &[MpmFluidParticle]| {
-                        if let Some(i) = tracked {
-                            if let Some(p) = ps.get(i) {
-                                return mpm_one_particle_metrics(p);
-                            }
-                        }
-                        mpm_particle_metrics(ps)
-                    },
-                );
+                match MPM_MATERIAL {
+                    MpmMaterial::Fluid => {
+                        let n = self.mpm_fluid_sim.num_particles() as u64;
+                        dbg.sample(
+                            &self.device,
+                            &self.queue,
+                            self.mpm_fluid_sim.particle_buffer(),
+                            n,
+                            t,
+                            |ps: &[MpmFluidParticle]| {
+                                if let Some(i) = tracked {
+                                    if let Some(p) = ps.get(i) {
+                                        return mpm_one_particle_metrics(p);
+                                    }
+                                }
+                                mpm_particle_metrics(ps)
+                            },
+                        );
+                    }
+                    MpmMaterial::Elastic => {
+                        let n = self.mpm_fluid_sim.num_elastic_particles() as u64;
+                        dbg.sample(
+                            &self.device,
+                            &self.queue,
+                            self.mpm_fluid_sim.elastic_particle_buffer(),
+                            n,
+                            t,
+                            |ps: &[MpmElasticParticle]| {
+                                if let Some(i) = tracked {
+                                    if let Some(p) = ps.get(i) {
+                                        return mpm_one_elastic_particle_metrics(p);
+                                    }
+                                }
+                                mpm_elastic_particle_metrics(ps)
+                            },
+                        );
+                    }
+                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(plot) = self.plot_window.as_ref() {
@@ -717,40 +785,64 @@ impl State {
         let Some(dbg) = self.mpm_debug.as_ref() else {
             return;
         };
-        let n = self.mpm_fluid_sim.num_particles() as u64;
-        let particles = dbg.read::<MpmFluidParticle>(
-            &self.device,
-            &self.queue,
-            self.mpm_fluid_sim.particle_buffer(),
-            n,
-        );
         let pick_r = (MPM_PARTICLE_RADIUS * 8.0).max(MPM_SPACING * 1.5);
         let pick_r2 = pick_r * pick_r;
-        let mut best: Option<(usize, f32)> = None;
-        for (i, p) in particles.iter().enumerate() {
-            let dx = p.position[0] - world[0];
-            let dy = p.position[1] - world[1];
-            let d2 = dx * dx + dy * dy;
-            if d2 <= pick_r2 && best.is_none_or(|(_, bd)| d2 < bd) {
-                best = Some((i, d2));
+        let (idx, pos) = match MPM_MATERIAL {
+            MpmMaterial::Fluid => {
+                let n = self.mpm_fluid_sim.num_particles() as u64;
+                let particles = dbg.read::<MpmFluidParticle>(
+                    &self.device,
+                    &self.queue,
+                    self.mpm_fluid_sim.particle_buffer(),
+                    n,
+                );
+                let mut best: Option<(usize, f32)> = None;
+                for (i, p) in particles.iter().enumerate() {
+                    let dx = p.position[0] - world[0];
+                    let dy = p.position[1] - world[1];
+                    let d2 = dx * dx + dy * dy;
+                    if d2 <= pick_r2 && best.is_none_or(|(_, bd)| d2 < bd) {
+                        best = Some((i, d2));
+                    }
+                }
+                let Some((idx, _)) = best else {
+                    self.window.set_title("fluids — no particle near click");
+                    return;
+                };
+                (idx, particles[idx].position)
             }
-        }
-        let Some((idx, _)) = best else {
-            self.window.set_title("fluids — no particle near click");
-            return;
+            MpmMaterial::Elastic => {
+                let n = self.mpm_fluid_sim.num_elastic_particles() as u64;
+                let particles = dbg.read::<MpmElasticParticle>(
+                    &self.device,
+                    &self.queue,
+                    self.mpm_fluid_sim.elastic_particle_buffer(),
+                    n,
+                );
+                let mut best: Option<(usize, f32)> = None;
+                for (i, p) in particles.iter().enumerate() {
+                    let dx = p.position[0] - world[0];
+                    let dy = p.position[1] - world[1];
+                    let d2 = dx * dx + dy * dy;
+                    if d2 <= pick_r2 && best.is_none_or(|(_, bd)| d2 < bd) {
+                        best = Some((i, d2));
+                    }
+                }
+                let Some((idx, _)) = best else {
+                    self.window.set_title("fluids — no particle near click");
+                    return;
+                };
+                (idx, particles[idx].position)
+            }
         };
-        let p = &particles[idx];
         self.tracked_particle = Some(idx);
         self.track_t0 = self.sim_time;
         if let Some(plot) = dbg.plot() {
-            plot.reset(format!(
-                "particle {idx}  @ ({:.3}, {:.3})",
-                p.position[0], p.position[1]
-            ));
+            plot.reset(format!("particle {idx}  @ ({:.3}, {:.3})", pos[0], pos[1]));
         }
         self.window.set_title(&format!(
             "fluids — tracking particle {idx} ({:.3}, {:.3})",
-            p.position[0], p.position[1]
+            pos[0], pos[1]
         ));
     }
 

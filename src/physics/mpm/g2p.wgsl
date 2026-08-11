@@ -41,8 +41,8 @@ const D_INV = 4.0 / (DX * DX);
 const DT = 0.0001;
 
 // for elastics
-const THETA_C = 0.01;
-const THETA_S = 0.01;
+const THETA_C = 0.2;
+const THETA_S = 0.2;
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> grid: array<GridParticle>;
@@ -83,7 +83,6 @@ fn get_updates(position: vec3<f32>) -> Updates {
 
     var new_v = vec3<f32>(0.0);
     var new_B = mat3x3<f32>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    var new_pos = vec3<f32>(0.0);
 
     for (var i = 0; i < 3; i++) {
         for (var j = 0; j < 3; j++) {
@@ -110,13 +109,12 @@ fn get_updates(position: vec3<f32>) -> Updates {
             ) / f32(grid[idx].mass);
             new_v += vi * weight;
             new_B += weight * outer(vi, xi_xp);
-            new_pos += (node_pos + vi * DT) * weight;
         }
     }
 
     result.new_v = new_v;
     result.new_B = new_B;
-    result.new_pos = new_pos;
+    result.new_pos = vec3<f32>(position.xy, 0.0) + new_v * DT;
     return result;
 }
 
@@ -188,11 +186,11 @@ fn plastic_projection(new_elastic_gradient: mat3x3<f32>, plastic_deformation_det
     let clamped = vec3<f32>(
         clamp(svd_decomp.S[0], 1.0 - THETA_C, 1.0 + THETA_S),
         clamp(svd_decomp.S[1], 1.0 - THETA_C, 1.0 + THETA_S),
-        0.0,
+        clamp(svd_decomp.S[2], 1.0 - THETA_C, 1.0 + THETA_S),
     );
     // determinant update is not shown in the pdf. but from eq (86), u can derive it urself
     // this is how much the clamped elastic grad's det scaled by
-    let det_scale = (clamped[0] / svd_decomp.S[0]) * (clamped[1] / svd_decomp.S[1]) * (clamped[2] / svd_decomp.S[2]);
+    let det_scale = (clamped[0] / svd_decomp.S[0]) * (clamped[1] / svd_decomp.S[1]);
     let new_determinant = plastic_deformation_determinant / det_scale;
 
     let clamped_S = mat3x3<f32>(clamped[0], 0.0, 0.0, 0.0, clamped[1], 0.0, 0.0, 0.0, clamped[2]);

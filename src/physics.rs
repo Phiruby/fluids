@@ -217,7 +217,7 @@ pub struct MpmElasticParticle {
     pub plastic_deformation_determinant: f32,
     pub rest_volume: f32,
     pub mass: f32,
-    _pad1: [f32; 3],
+    _pad1: [f32; 2],
 }
 
 impl Default for MpmElasticParticle {
@@ -231,7 +231,7 @@ impl Default for MpmElasticParticle {
             plastic_deformation_determinant: 1.0,
             rest_volume: 0.0,
             mass: 0.0,
-            _pad1: [0.0; 3],
+            _pad1: [0.0; 2],
         }
     }
 }
@@ -239,7 +239,7 @@ impl Default for MpmElasticParticle {
 impl GpuParticle for MpmElasticParticle {
     fn wgsl_fields() -> &'static str {
         r#"
-        plastic_deformation_gradient: mat3x3<f32>,
+        elastic_deformation_gradient: mat3x3<f32>,
         B: mat3x3<f32>,
         position: vec3<f32>,
         velocity: vec3<f32>,
@@ -256,7 +256,7 @@ impl RenderParticle for MpmElasticParticle {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[wgpu::VertexAttribute {
-                offset: std::mem::offset_of!(MpmFluidParticle, position) as wgpu::BufferAddress,
+                offset: std::mem::offset_of!(MpmElasticParticle, position) as wgpu::BufferAddress,
                 shader_location: 2,
                 format: wgpu::VertexFormat::Float32x3,
             }],
@@ -271,7 +271,7 @@ impl RenderParticle for MpmElasticParticle {
 
     fn vs_main_body() -> &'static str {
         r#"
-        var out = particle_out(input, vec3<f32>(1.0, 1.0, 1.0), 1.0);
+        var out = particle_out(input, vec3<f32>(0.85, 0.55, 0.25), 1.0);
         out.world_normal = vec3<f32>(0.0);
         return out;
         "#
@@ -371,6 +371,11 @@ pub fn mpm_lattice_rest_density(spacing: f32, mass: f32, dx: f32) -> f32 {
     density
 }
 
+pub fn mpm_lattice_rest_volume(spacing: f32, mass: f32, dx: f32) -> f32 {
+    let density = mpm_lattice_rest_density(spacing, mass, dx);
+    (mass / density) * dx * dx
+}
+
 /// nx × ny block of fluid particles in the XY plane (z unused / pinned to origin.z).
 pub fn mpm_fluid_block(
     nx: usize,
@@ -394,6 +399,37 @@ pub fn mpm_fluid_block(
                     origin.z,
                 ],
                 rest_density,
+                mass,
+                ..Default::default()
+            });
+        }
+    }
+    particles
+}
+
+/// square elastic block (in 2D right now)
+pub fn mpm_elastic_block(
+    nx: usize,
+    ny: usize,
+    spacing: f32,
+    origin: Vector3<f32>,
+) -> Vec<MpmElasticParticle> {
+    let material_density = 400.0;
+    let mass = material_density * spacing * spacing;
+    let rest_volume = mpm_lattice_rest_volume(spacing, mass, mpm::MPM_DX);
+    let mut particles = Vec::with_capacity(nx * ny);
+    for i in 0..nx {
+        for j in 0..ny {
+            particles.push(MpmElasticParticle {
+                elastic_deformation_gradient: wgsl_mat3_identity(),
+                b: [[0.0; 4]; 3],
+                position: [
+                    origin.x + i as f32 * spacing,
+                    origin.y + j as f32 * spacing,
+                    origin.z,
+                ],
+                plastic_deformation_determinant: 1.0,
+                rest_volume,
                 mass,
                 ..Default::default()
             });
@@ -438,30 +474,6 @@ pub fn assign_rest_densities(
     }
 }
 
-pub fn neighbor_sum<F, T>(delta: F, neighbors: &[usize], zero: T) -> T
-where
-    F: Fn(usize) -> T,
-    T: Add<Output = T>,
-{
-    let mut sum = zero;
-    for &neighbor_idx in neighbors {
-        sum = sum + delta(neighbor_idx);
-    }
-    sum
-}
-
-pub fn precompute_neighbors(positions: &[Vector3<f32>], kernel: &CubicKernel) -> Vec<Vec<usize>> {
-    let mut neighbors = vec![Vec::new(); positions.len()];
-    for i in 0..positions.len() {
-        for j in 0..positions.len() {
-            if (positions[i] - positions[j]).norm() <= kernel.h {
-                neighbors[i].push(j);
-            }
-        }
-    }
-    neighbors
-}
-
 #[derive(Debug, Clone)]
 pub struct CubicKernel {
     pub h: f32,
@@ -481,28 +493,5 @@ impl CubicKernel {
         } else {
             0.0
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cubic_kernel() {
-        let kernel = CubicKernel::new(1.0);
-        let x_i = vec![Vector3::new(0.0, 0.0, 0.0)];
-        let x_j = vec![Vector3::new(1.0, 0.0, 0.0)];
-        let neighbors = precompute_neighbors(&x_j, &kernel);
-        let w = kernel.weight((x_i[0] - x_j[0]).norm());
-        assert_eq!(neighbors.len(), 1);
-        assert_eq!(w, 0.0);
-    }
-
-    #[test]
-    fn test_neighbor_sum() {
-        let neighbors = vec![1, 3, 5];
-        let sum = neighbor_sum(|idx| idx, &neighbors, 0);
-        assert_eq!(sum, 9);
     }
 }

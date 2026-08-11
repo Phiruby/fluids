@@ -1,7 +1,7 @@
 mod objects;
 
 use crate::load_wgsl;
-use crate::physics::{MpmFluidParticle, MpmGridNode};
+use crate::physics::{MpmElasticParticle, MpmFluidParticle, MpmGridNode};
 
 use wgpu::util::DeviceExt;
 
@@ -24,8 +24,10 @@ pub fn mpm_grid_bounds() -> ([f32; 3], [f32; 3]) {
 /// interpolate data from particles to grid nodes (two-pass: mass/momentum, then density stress).
 /// two-pass idea from https://nialltl.neocities.org/articles/mpm_guide
 struct P2G {
-    mass_pipeline: wgpu::ComputePipeline,
-    stress_pipeline: wgpu::ComputePipeline,
+    fluid_mass_pipeline: wgpu::ComputePipeline,
+    elastic_mass_pipeline: wgpu::ComputePipeline,
+    fluid_stress_pipeline: wgpu::ComputePipeline,
+    elastic_stress_pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     grid: wgpu::Buffer,
 }
@@ -56,6 +58,16 @@ impl P2G {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -63,7 +75,7 @@ impl P2G {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let mass_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let fluid_mass_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("p2g_mass"),
             layout: Some(&pipeline_layout),
             module: &module,
@@ -71,14 +83,33 @@ impl P2G {
             cache: Default::default(),
             compilation_options: Default::default(),
         });
-        let stress_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("p2g_stress"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("particles_to_grid_stress"),
-            cache: Default::default(),
-            compilation_options: Default::default(),
-        });
+        let elastic_mass_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("p2g_elastic_mass"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("elastic_particles_to_grid"),
+                cache: Default::default(),
+                compilation_options: Default::default(),
+            });
+        let fluid_stress_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("p2g_stress"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("fluid_particles_to_grid_stress"),
+                cache: Default::default(),
+                compilation_options: Default::default(),
+            });
+        let elastic_stress_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("p2g_elastic_stress"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("elastic_particles_to_grid_stress"),
+                cache: Default::default(),
+                compilation_options: Default::default(),
+            });
         let grid = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mpm grid"),
             size: size_of::<MpmGridNode>() as u64 * N * N,
@@ -88,8 +119,10 @@ impl P2G {
             mapped_at_creation: false,
         });
         Self {
-            mass_pipeline,
-            stress_pipeline,
+            fluid_mass_pipeline,
+            elastic_mass_pipeline,
+            fluid_stress_pipeline,
+            elastic_stress_pipeline,
             layout,
             grid,
         }
@@ -100,9 +133,10 @@ impl P2G {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         particles: &wgpu::Buffer,
+        elastic_particles: &wgpu::Buffer,
         num_particles: u32,
+        num_elastic: u32,
     ) {
-        encoder.clear_buffer(&self.grid, 0, None);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("p2g"),
             layout: &self.layout,
@@ -115,20 +149,37 @@ impl P2G {
                     binding: 1,
                     resource: self.grid.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: elastic_particles.as_entire_binding(),
+                },
             ],
         });
-        let groups = num_particles.div_ceil(WG_SIZE);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(&self.mass_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(groups, 1, 1);
+            if num_particles > 0 {
+                pass.set_pipeline(&self.fluid_mass_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(num_particles.div_ceil(WG_SIZE), 1, 1);
+            }
+            if num_elastic > 0 {
+                pass.set_pipeline(&self.elastic_mass_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(num_elastic.div_ceil(WG_SIZE), 1, 1);
+            }
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(&self.stress_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(groups, 1, 1);
+            if num_particles > 0 {
+                pass.set_pipeline(&self.fluid_stress_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(num_particles.div_ceil(WG_SIZE), 1, 1);
+            }
+            if num_elastic > 0 {
+                pass.set_pipeline(&self.elastic_stress_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(num_elastic.div_ceil(WG_SIZE), 1, 1);
+            }
         }
     }
 }
@@ -238,7 +289,8 @@ impl GridSimulation {
 
 /// transfer from grid to particle
 struct G2P {
-    pipeline: wgpu::ComputePipeline,
+    fluid_pipeline: wgpu::ComputePipeline,
+    elastic_pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -279,6 +331,16 @@ impl G2P {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -286,7 +348,7 @@ impl G2P {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let fluid_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("g2p"),
             layout: Some(&pipeline_layout),
             module: &module,
@@ -294,7 +356,19 @@ impl G2P {
             cache: Default::default(),
             compilation_options: Default::default(),
         });
-        Self { pipeline, layout }
+        let elastic_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("g2p_elastic"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("elastic_grid_to_particles"),
+            cache: Default::default(),
+            compilation_options: Default::default(),
+        });
+        Self {
+            fluid_pipeline,
+            elastic_pipeline,
+            layout,
+        }
     }
 
     pub fn compute(
@@ -302,9 +376,11 @@ impl G2P {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         particles: &wgpu::Buffer,
+        elastic_particles: &wgpu::Buffer,
         grid: &wgpu::Buffer,
         collider: &wgpu::Buffer,
         num_particles: u32,
+        num_elastic: u32,
     ) {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("g2p"),
@@ -322,20 +398,52 @@ impl G2P {
                     binding: 2,
                     resource: collider.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: elastic_particles.as_entire_binding(),
+                },
             ],
         });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(num_particles.div_ceil(WG_SIZE), 1, 1);
+        if num_particles > 0 {
+            pass.set_pipeline(&self.fluid_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(num_particles.div_ceil(WG_SIZE), 1, 1);
+        }
+        if num_elastic > 0 {
+            pass.set_pipeline(&self.elastic_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(num_elastic.div_ceil(WG_SIZE), 1, 1);
+        }
     }
 }
 
-/// perform plastic projection: eq (79) - (86) in https://alexey.stomakhin.com/research/siggraph2016_mpm.pdf
-/// only for elastic solids; not applied to fluids
-struct PlasticProjection {
-    pipeline: wgpu::ComputePipeline,
-    layout: wgpu::BindGroupLayout,
+fn particle_storage_buffer<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    label: &str,
+    particles: &[T],
+) -> wgpu::Buffer {
+    // wgpu rejects zero-sized buffers; keep a one-slot placeholder when empty.
+    if particles.is_empty() {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: size_of::<T>() as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    } else {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(particles),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        })
+    }
 }
 
 pub struct MpmFluidSim {
@@ -343,31 +451,35 @@ pub struct MpmFluidSim {
     grid_simulation: GridSimulation,
     g2p: G2P,
     particles: wgpu::Buffer,
+    elastic_particles: wgpu::Buffer,
     num_particles: u32,
+    num_elastic: u32,
 }
 
 impl MpmFluidSim {
-    pub fn new(device: &wgpu::Device, particles: &[MpmFluidParticle]) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        particles: &[MpmFluidParticle],
+        elastic_particles: &[MpmElasticParticle],
+    ) -> Self {
         let num_particles = particles.len() as u32;
-        let particles = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mpm particles"),
-            contents: bytemuck::cast_slice(particles),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        });
+        let num_elastic = elastic_particles.len() as u32;
+        let particles = particle_storage_buffer(device, "mpm particles", particles);
+        let elastic_particles =
+            particle_storage_buffer(device, "mpm elastic particles", elastic_particles);
         Self {
             p2g: P2G::new(device),
             grid_simulation: GridSimulation::new(device),
             g2p: G2P::new(device),
             particles,
+            elastic_particles,
             num_particles,
+            num_elastic,
         }
     }
 
     pub fn step(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
-        if self.num_particles == 0 {
+        if self.num_particles == 0 && self.num_elastic == 0 {
             return;
         }
         const SUBSTEPS: u32 = 8;
@@ -377,22 +489,35 @@ impl MpmFluidSim {
     }
 
     fn substep(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
-        self.p2g
-            .compute(device, encoder, &self.particles, self.num_particles);
+        encoder.clear_buffer(&self.p2g.grid, 0, None);
+        self.p2g.compute(
+            device,
+            encoder,
+            &self.particles,
+            &self.elastic_particles,
+            self.num_particles,
+            self.num_elastic,
+        );
         self.grid_simulation
             .compute(device, encoder, &self.p2g.grid);
         self.g2p.compute(
             device,
             encoder,
             &self.particles,
+            &self.elastic_particles,
             &self.p2g.grid,
             &self.grid_simulation.collider_buffer,
             self.num_particles,
+            self.num_elastic,
         );
     }
 
     pub fn particle_buffer(&self) -> &wgpu::Buffer {
         &self.particles
+    }
+
+    pub fn elastic_particle_buffer(&self) -> &wgpu::Buffer {
+        &self.elastic_particles
     }
 
     pub fn grid_buffer(&self) -> &wgpu::Buffer {
@@ -401,6 +526,10 @@ impl MpmFluidSim {
 
     pub fn num_particles(&self) -> u32 {
         self.num_particles
+    }
+
+    pub fn num_elastic_particles(&self) -> u32 {
+        self.num_elastic
     }
 
     pub fn num_grid_nodes(&self) -> u32 {
@@ -412,7 +541,7 @@ impl MpmFluidSim {
 mod mpm_step_tests {
     use super::*;
     use crate::graphics::BufferDebug;
-    use crate::physics::mpm_fluid_block;
+    use crate::physics::{mpm_elastic_block, mpm_fluid_block};
     use nalgebra::Vector3;
 
     fn gpu() -> (wgpu::Device, wgpu::Queue) {
@@ -429,7 +558,7 @@ mod mpm_step_tests {
         let (device, queue) = gpu();
         let particles = mpm_fluid_block(8, 8, 0.02, Vector3::new(0.2, 0.6, 0.0));
         let before = particles[0].position;
-        let sim = MpmFluidSim::new(&device, &particles);
+        let sim = MpmFluidSim::new(&device, &particles, &[]);
         let dbg = BufferDebug::new(&device, sim.particles.size());
         let grid_dbg = BufferDebug::new(&device, sim.p2g.grid.size());
 

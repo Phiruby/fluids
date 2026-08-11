@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
-use crate::physics::MpmFluidParticle;
+use crate::physics::{MpmElasticParticle, MpmFluidParticle};
 use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
@@ -565,6 +565,52 @@ pub fn mpm_one_particle_metrics(p: &MpmFluidParticle) -> Vec<(String, f64)> {
         ("vx".into(), p.velocity[0] as f64),
         ("vy".into(), p.velocity[1] as f64),
         ("j".into(), j),
+        ("x".into(), p.position[0] as f64),
+        ("y".into(), p.position[1] as f64),
+    ]
+}
+
+pub fn mpm_elastic_particle_metrics(ps: &[MpmElasticParticle]) -> Vec<(String, f64)> {
+    let mut max_speed = 0.0f64;
+    let mut min_j = f64::MAX;
+    let mut max_j = f64::MIN;
+    let mut nan = 0.0;
+    for p in ps {
+        let sp = (p.velocity[0] * p.velocity[0] + p.velocity[1] * p.velocity[1]).sqrt() as f64;
+        if !sp.is_finite() {
+            nan += 1.0;
+            continue;
+        }
+        max_speed = max_speed.max(sp);
+        let f = p.elastic_deformation_gradient;
+        let j = (f[0][0] * f[1][1] - f[0][1] * f[1][0]) as f64;
+        if j.is_finite() {
+            min_j = min_j.min(j);
+            max_j = max_j.max(j);
+        }
+    }
+    if min_j == f64::MAX {
+        min_j = 0.0;
+        max_j = 0.0;
+    }
+    vec![
+        ("max_speed".into(), max_speed),
+        ("min_j".into(), min_j),
+        ("max_j".into(), max_j),
+        ("nan_count".into(), nan),
+    ]
+}
+
+pub fn mpm_one_elastic_particle_metrics(p: &MpmElasticParticle) -> Vec<(String, f64)> {
+    let speed = (p.velocity[0] * p.velocity[0] + p.velocity[1] * p.velocity[1]).sqrt() as f64;
+    let f = p.elastic_deformation_gradient;
+    let j = (f[0][0] * f[1][1] - f[0][1] * f[1][0]) as f64;
+    vec![
+        ("speed".into(), speed),
+        ("vx".into(), p.velocity[0] as f64),
+        ("vy".into(), p.velocity[1] as f64),
+        ("j".into(), j),
+        ("Jp".into(), p.plastic_deformation_determinant as f64),
         ("x".into(), p.position[0] as f64),
         ("y".into(), p.position[1] as f64),
     ]
