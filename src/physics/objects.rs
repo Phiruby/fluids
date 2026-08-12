@@ -1,6 +1,7 @@
 use crate::physics::{
     FluidParticle, MpmElasticParticle, MpmFluidParticle, FLUID_COLOR, mpm_fluid_block,
 };
+mod sdf;
 use nalgebra::Vector3;
 
 pub struct MpmWorld {
