@@ -58,8 +58,20 @@ pub struct SphWorld {
     fluid_particles: Vec<FluidParticle>,
 }
 
+trait SimulationBackend {
+    fn simulate(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        todo!();
+    }
+    fn draw(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        todo!();
+    }
+}
+
 pub enum Mpm {}
 pub enum Sph {}
+// TODO: add trait impl
+impl SimulationBackend for Mpm {}
+impl SimulationBackend for Sph {}
 
 const SIM_BACKEND: SimBackend = SimBackend::Mpm;
 // marching cubes slow and bad :(
@@ -718,7 +730,9 @@ impl<T> State<T> {
     }
 }
 
-impl State<Sph> {
+impl<T> Renderer for State<T> {}
+
+impl Renderer for State<Sph> {
     fn simulate(&mut self, encoder: &mut wgpu::CommandEncoder) {
         self.fluid_sim.step(&self.device, &self.queue, encoder);
     }
