@@ -38,7 +38,7 @@ enum FluidRenderMode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SimBackend {
+pub enum SimBackend {
     Sph,
     Mpm,
 }
@@ -48,6 +48,18 @@ enum MpmMaterial {
     Fluid,
     Elastic,
 }
+
+pub struct MpmWorld {
+    elastic_particles: Vec<MpmElasticParticle>,
+    fluid_particles: Vec<MpmFluidParticle>,
+}
+
+pub struct SphWorld {
+    fluid_particles: Vec<FluidParticle>,
+}
+
+pub enum Mpm {}
+pub enum Sph {}
 
 const SIM_BACKEND: SimBackend = SimBackend::Mpm;
 // marching cubes slow and bad :(
@@ -90,6 +102,7 @@ pub(crate) struct Camera {
     znear: f32,
     zfar: f32,
 }
+
 impl Camera {
     fn build_view_projection_matrix(&self) -> (cgmath::Matrix4<f32>, cgmath::Matrix4<f32>) {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
@@ -104,7 +117,8 @@ impl Camera {
         (focal_x, focal_y)
     }
 }
-pub struct State {
+
+pub struct State<T> {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -132,6 +146,7 @@ pub struct State {
     depth_texture: Texture,
     fluid_sim: FluidSim,
     mpm_fluid_sim: MpmFluidSim,
+    _backend: std::marker::PhantomData<T>,
 }
 
 #[repr(C)]
@@ -166,7 +181,8 @@ impl CameraUniform {
         self.camera_pos = camera.eye.into();
     }
 }
-impl State {
+
+impl<T> State<T> {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -432,6 +448,7 @@ impl State {
             mpm_fluid_sim,
             sph_screen_space,
             mpm_screen_space,
+            _backend: std::marker::PhantomData,
         })
     }
 
@@ -690,7 +707,6 @@ impl State {
             .process_cursor_moved(position, &mut self.camera);
     }
 
-
     fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_projection(&self.camera);
@@ -702,13 +718,103 @@ impl State {
     }
 }
 
-pub struct App {
-    #[cfg(target_arch = "wasm32")]
-    proxy: Option<winit::event_loop::EventLoopProxy<State>>,
-    state: Option<State>,
+impl State<Sph> {
+    fn simulate(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        self.fluid_sim.step(&self.device, &self.queue, encoder);
+    }
+    fn draw(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        if FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
+            self.marching_cubes.extract(
+                &self.device,
+                encoder,
+                self.fluid_sim.particle_buffer(),
+                self.fluid_sim.hash_offsets_buffer(),
+            );
+        }
+
+        if FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering {
+            // perform compaction (filter out boundary particles) b4 creating render pass
+            self.sph_screen_space.prepare(
+                &self.device,
+                self.fluid_sim.particle_buffer(),
+                encoder,
+                &self.camera_bind_group,
+            );
+        }
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+
+            match FLUID_RENDER_MODE {
+                FluidRenderMode::Particles => {
+                    self.fluid_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        self.fluid_sim.particle_buffer(),
+                        self.fluid_sim.num_particles(),
+                    );
+                }
+                FluidRenderMode::MarchingCubes => {
+                    self.mc_pipeline.draw(
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                        self.marching_cubes.vertex_buffer(),
+                        self.marching_cubes.index_buffer(),
+                        self.marching_cubes.indirect_buffer(),
+                    );
+                }
+                FluidRenderMode::ScreenSpaceFluidRendering => {
+                    self.sph_screen_space.draw(
+                        &self.device,
+                        &mut render_pass,
+                        &self.camera_bind_group,
+                    );
+                }
+            }
+
+            self.wireframe_pipeline.draw(
+                &mut render_pass,
+                &self.camera_bind_group,
+                &self.sph_wireframe,
+            );
+        }
+    }
 }
 
-impl App {
+pub struct App<T> {
+    #[cfg(target_arch = "wasm32")]
+    proxy: Option<winit::event_loop::EventLoopProxy<State>>,
+    state: Option<State<T>>,
+}
+
+impl<T> App<T> {
     pub fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<State>) -> Self {
         #[cfg(target_arch = "wasm32")]
         let proxy = Some(event_loop.create_proxy());
@@ -720,7 +826,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler<State> for App {
+impl<T: 'static> ApplicationHandler<State<T>> for App<T> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         #[allow(unused_mut)]
         let mut window_attributes = Window::default_attributes();
@@ -769,7 +875,7 @@ impl ApplicationHandler<State> for App {
     }
 
     #[allow(unused_mut)]
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: State) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: State<T>) {
         #[cfg(target_arch = "wasm32")]
         {
             event.window.request_redraw();
@@ -845,7 +951,7 @@ pub fn run() -> anyhow::Result<()> {
     let event_loop = EventLoop::with_user_event().build()?;
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut app = App::new();
+        let mut app = App::<Mpm>::new();
         event_loop.run_app(&mut app)?;
     }
     #[cfg(target_arch = "wasm32")]

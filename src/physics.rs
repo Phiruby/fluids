@@ -1,4 +1,5 @@
 mod mpm;
+mod objects;
 mod pipelines;
 mod sph;
 use nalgebra::Vector3;
@@ -389,9 +390,8 @@ pub fn mpm_lattice_rest_density(spacing: f32, mass: f32, dx: f32) -> f32 {
                 let rx = (cx as f32 * dx - p[0]) / dx;
                 let ry = (cy as f32 * dx - p[1]) / dx;
                 let rz = (cz as f32 * dx - p[2]) / dx;
-                let w = mpm_quadratic_kernel(rx)
-                    * mpm_quadratic_kernel(ry)
-                    * mpm_quadratic_kernel(rz);
+                let w =
+                    mpm_quadratic_kernel(rx) * mpm_quadratic_kernel(ry) * mpm_quadratic_kernel(rz);
                 density += grid.get(&(cx, cy, cz)).copied().unwrap_or(0.0) * w;
             }
         }
