@@ -6,6 +6,7 @@ use nalgebra::Vector3;
 use std::ops::Add;
 
 pub use mpm::{MpmFluidSim, mpm_collider_bounds, mpm_grid_bounds};
+pub use objects::{FluidCube, MpmObject, MpmWorld, SphObject, SphWorld};
 pub(crate) use pipelines::PrefixSum;
 pub use sph::boundaries::ContainerBoundary;
 pub use sph::fluids::FluidSim;
@@ -297,29 +298,6 @@ pub struct MpmGridNode {
     pub force_x: f32,
     pub force_y: f32,
     pub force_z: f32,
-}
-
-/// n x n x n cube of fluid particles
-pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidParticle> {
-    let mut particles = Vec::with_capacity(n * n * n);
-    for i in 0..n {
-        for j in 0..n {
-            for k in 0..n {
-                particles.push(FluidParticle {
-                    position: [
-                        origin.x + i as f32 * spacing,
-                        origin.y + j as f32 * spacing,
-                        origin.z + k as f32 * spacing,
-                    ],
-                    normal: FLUID_COLOR,
-                    mass: 1.0,
-                    boundary: 1,
-                    ..Default::default()
-                });
-            }
-        }
-    }
-    particles
 }
 
 fn mpm_quadratic_kernel(r: f32) -> f32 {
