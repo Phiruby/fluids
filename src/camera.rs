@@ -37,7 +37,11 @@ impl CameraController {
         }
     }
 
-    pub fn process_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>, camera: &mut Camera) {
+    pub fn process_cursor_moved(
+        &mut self,
+        position: winit::dpi::PhysicalPosition<f64>,
+        camera: &mut Camera,
+    ) {
         let current = cgmath::Point2::new(position.x, position.y);
         if self.is_right_mouse_down {
             if let Some(prev) = self.last_cursor {
@@ -90,16 +94,15 @@ impl CameraController {
         let forward_mag = forward.magnitude();
 
         if self.is_strafe_right_pressed {
-            camera.eye =
-                camera.target - (forward + right * self.speed).normalize() * forward_mag;
+            camera.eye = camera.target - (forward + right * self.speed).normalize() * forward_mag;
         }
         if self.is_strafe_left_pressed {
-            camera.eye =
-                camera.target - (forward - right * self.speed).normalize() * forward_mag;
+            camera.eye = camera.target - (forward - right * self.speed).normalize() * forward_mag;
         }
     }
 
     fn pan(&self, camera: &mut Camera, dx: f32, dy: f32) {
-        camera.target += cgmath::Vector3::new(dx * self.pan_sensitivity, -dy * self.pan_sensitivity, 0.0);
+        camera.target +=
+            cgmath::Vector3::new(dx * self.pan_sensitivity, -dy * self.pan_sensitivity, 0.0);
     }
 }

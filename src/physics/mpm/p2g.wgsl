@@ -184,16 +184,11 @@ fn scatter_mass_momentum(
                 let total_velocity = velocity + affine_contribution;
                 let mass_contribution = weight * mass;
                 let momentum_contribution = mass_contribution * total_velocity;
-                let gravity_force = -weight * mass * vec3<f32>(0.0, 9.81, 0.0);
-
                 let idx = get_grid_index(vec3<u32>(current_coord));
                 atomic_add_mass(idx, mass_contribution);
                 atomic_add_momentum_x(idx, momentum_contribution.x);
                 atomic_add_momentum_y(idx, momentum_contribution.y);
                 atomic_add_momentum_z(idx, momentum_contribution.z);
-                atomic_add_force_x(idx, gravity_force.x);
-                atomic_add_force_y(idx, gravity_force.y);
-                atomic_add_force_z(idx, gravity_force.z);
             }
         }
     }

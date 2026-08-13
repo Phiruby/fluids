@@ -1,3 +1,5 @@
+#include <../objects/sdf.wgsl>
+
 struct GridParticle {
     momentum_x: f32,
     momentum_y: f32,
@@ -16,11 +18,10 @@ struct ColliderUniform {
 const DX: f32 = 0.02;
 const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const N: u32 = 32u;
-const DT = 0.0001;
-const MU = 0.4;
 
 @group(0) @binding(0) var<storage, read_write> grid: array<GridParticle>;
 @group(0) @binding(1) var<uniform> collider: ColliderUniform;
+@group(0) @binding(2) var<storage, read_write> rigid_bodies: array<RigidBody>;
 
 fn get_grid_coord(idx: u32) -> vec3<u32> {
     let z = idx % N;
@@ -29,29 +30,30 @@ fn get_grid_coord(idx: u32) -> vec3<u32> {
     return vec3<u32>(x, y, z);
 }
 
-fn sd_box(p: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> f32 {
+fn sd_domain(p: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> f32 {
     let c = 0.5 * (bmin + bmax);
     let b = 0.5 * (bmax - bmin);
     let q = abs(p - c) - b;
     return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 
-fn sd_box_normal(p: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> vec3<f32> {
+fn sd_domain_normal(p: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> vec3<f32> {
     let e = 1e-3;
     let n = vec3<f32>(
-        sd_box(p + vec3<f32>(e, 0.0, 0.0), bmin, bmax) - sd_box(p - vec3<f32>(e, 0.0, 0.0), bmin, bmax),
-        sd_box(p + vec3<f32>(0.0, e, 0.0), bmin, bmax) - sd_box(p - vec3<f32>(0.0, e, 0.0), bmin, bmax),
-        sd_box(p + vec3<f32>(0.0, 0.0, e), bmin, bmax) - sd_box(p - vec3<f32>(0.0, 0.0, e), bmin, bmax),
+        sd_domain(p + vec3<f32>(e, 0.0, 0.0), bmin, bmax) - sd_domain(p - vec3<f32>(e, 0.0, 0.0), bmin, bmax),
+        sd_domain(p + vec3<f32>(0.0, e, 0.0), bmin, bmax) - sd_domain(p - vec3<f32>(0.0, e, 0.0), bmin, bmax),
+        sd_domain(p + vec3<f32>(0.0, 0.0, e), bmin, bmax) - sd_domain(p - vec3<f32>(0.0, 0.0, e), bmin, bmax),
     );
     return normalize(n);
 }
 
-fn collide_velocity(pos: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
-    let phi = sd_box(pos, collider.min, collider.max);
+// collision with bounding box (deomain of simulation)
+fn collide_domain(pos: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    let phi = sd_domain(pos, collider.min, collider.max);
     if phi <= 0.0 {
         return v;
     }
-    let n = -sd_box_normal(pos, collider.min, collider.max);
+    let n = -sd_domain_normal(pos, collider.min, collider.max);
     let vn = dot(v, n);
     if vn >= 0.0 {
         return v;
@@ -64,6 +66,74 @@ fn collide_velocity(pos: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     return vt + MU * vn * vt / vt_len;
 }
 
+fn atomic_add_rb(i: u32, force: vec3<f32>, torque: vec3<f32>) {
+    var old_bits = atomicLoad(&rigid_bodies[i].force_x);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + force.x);
+        let result = atomicCompareExchangeWeak(&rigid_bodies[i].force_x, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+    old_bits = atomicLoad(&rigid_bodies[i].force_y);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + force.y);
+        let result = atomicCompareExchangeWeak(&rigid_bodies[i].force_y, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+    old_bits = atomicLoad(&rigid_bodies[i].force_z);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + force.z);
+        let result = atomicCompareExchangeWeak(&rigid_bodies[i].force_z, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+    old_bits = atomicLoad(&rigid_bodies[i].torque_x);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + torque.x);
+        let result = atomicCompareExchangeWeak(&rigid_bodies[i].torque_x, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+    old_bits = atomicLoad(&rigid_bodies[i].torque_y);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + torque.y);
+        let result = atomicCompareExchangeWeak(&rigid_bodies[i].torque_y, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+    old_bits = atomicLoad(&rigid_bodies[i].torque_z);
+    loop {
+        let new_bits = bitcast<u32>(bitcast<f32>(old_bits) + torque.z);
+        let result = atomicCompareExchangeWeak(&rigid_bodies[i].torque_z, old_bits, new_bits);
+        if result.exchanged { break; }
+        old_bits = result.old_value;
+    }
+}
+
+fn collide_rigids(pos: vec3<f32>, v: vec3<f32>, mass: f32) -> vec3<f32> {
+    var v_out = v;
+    let n = arrayLength(&rigid_bodies);
+    for (var i = 0u; i < n; i++) {
+        var s: RigidState;
+        s.object_type = rigid_bodies[i].object_type;
+        s.invert = rigid_bodies[i].invert;
+        s.position = rigid_bodies[i].position;
+        s.scale = rigid_bodies[i].scale;
+        s.orientation = rigid_bodies[i].orientation;
+        s.params = rigid_bodies[i].params;
+        s.v_cm = rigid_bodies[i].v_cm;
+        s.mass = rigid_bodies[i].mass;
+        s.omega = rigid_bodies[i].omega;
+        let hit = collide_rigid(s, pos, v_out, mass);
+        if any(hit.force != vec3<f32>(0.0)) {
+            atomic_add_rb(i, hit.force, cross(pos - s.position, hit.force));
+        }
+        v_out = hit.v;
+    }
+    return v_out;
+}
+
 @compute
 @workgroup_size(256)
 fn update_momentum(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -74,14 +144,15 @@ fn update_momentum(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var mom = vec3<f32>(
         p.momentum_x + p.force_x * DT,
-        p.momentum_y + p.force_y * DT,
+        p.momentum_y + (p.force_y - 9.81 * p.mass) * DT,
         p.momentum_z + p.force_z * DT,
     );
 
     let coord = get_grid_coord(idx);
     let node_pos = BOTTOM_LEFT + vec3<f32>(coord) * DX;
     var v = mom / p.mass;
-    v = collide_velocity(node_pos, v);
+    v = collide_domain(node_pos, v);
+    v = collide_rigids(node_pos, v, p.mass);
     mom = v * p.mass;
 
     grid[idx].momentum_x = mom.x;

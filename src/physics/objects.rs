@@ -1,12 +1,14 @@
 use crate::physics::{
-    FluidParticle, MpmElasticParticle, MpmFluidParticle, FLUID_COLOR, mpm_fluid_block,
+    FLUID_COLOR, FluidParticle, MpmElasticParticle, MpmFluidParticle, mpm_fluid_block,
 };
 mod sdf;
 use nalgebra::Vector3;
+pub use sdf::{RigidBody, RigidBox};
 
 pub struct MpmWorld {
     pub elastic_particles: Vec<MpmElasticParticle>,
     pub fluid_particles: Vec<MpmFluidParticle>,
+    pub rigid_bodies: Vec<RigidBody>,
 }
 
 impl Default for MpmWorld {
@@ -14,6 +16,7 @@ impl Default for MpmWorld {
         Self {
             elastic_particles: Vec::new(),
             fluid_particles: Vec::new(),
+            rigid_bodies: Vec::new(),
         }
     }
 }

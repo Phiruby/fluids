@@ -1,18 +1,18 @@
+mod backends;
 mod camera;
 mod graphics;
 mod physics;
 mod texture;
-mod backends;
+use crate::backends::SimulationBackend;
 use crate::camera::CameraController;
 use crate::graphics::{
-    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, ScreenSpaceRendering, WireframeBox,
-    WireframeBoxPipeline,
+    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, RigidBodyPipeline,
+    ScreenSpaceRendering, WireframeBox, WireframeBoxPipeline,
 };
 use crate::physics::{
     ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmElasticParticle, MpmFluidParticle,
     MpmFluidSim, assign_rest_densities, mpm_collider_bounds, mpm_grid_bounds,
 };
-use crate::backends::SimulationBackend;
 use crate::texture::Texture;
 use bytemuck;
 use cgmath::SquareMatrix;
@@ -30,8 +30,8 @@ use winit::{
     window::Window,
 };
 
-pub use crate::backends::{Mpm, Sph, SimBackend};
-pub use crate::physics::{FluidCube, MpmObject, SphObject};
+pub use crate::backends::{Mpm, SimBackend, Sph};
+pub use crate::physics::{FluidCube, MpmObject, RigidBox, SphObject};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FluidRenderMode {
@@ -39,7 +39,6 @@ pub enum FluidRenderMode {
     MarchingCubes,
     ScreenSpaceFluidRendering,
 }
-
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MpmMaterial {
@@ -49,7 +48,7 @@ pub enum MpmMaterial {
 
 const SIM_BACKEND: SimBackend = SimBackend::Mpm;
 // marching cubes slow and bad :(
-const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRendering;
+const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::Particles;
 const MPM_MATERIAL: MpmMaterial = MpmMaterial::Fluid;
 
 const FLUID_SPACING: f32 = 0.03;
@@ -59,9 +58,11 @@ const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
 
-const MPM_BLOCK_N: usize = 32;
+const MPM_BLOCK_N: usize = 16;
 const MPM_SPACING: f32 = 0.01;
-const MPM_ORIGIN: [f32; 3] = [0.16, 0.28, 0.16];
+const MPM_ORIGIN: [f32; 3] = [0.24, 0.18, 0.24];
+const MPM_BOX_CENTER: [f32; 3] = [0.32, 0.09, 0.32];
+const MPM_BOX_HALF: [f32; 3] = [0.12, 0.05, 0.12];
 const MPM_PARTICLE_RADIUS: f32 = 0.01;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
@@ -114,6 +115,7 @@ pub struct State<T: SimulationBackend> {
     fluid_pipeline: RenderPipeline<FluidParticle>,
     mpm_pipeline: RenderPipeline<MpmFluidParticle>,
     mpm_elastic_pipeline: RenderPipeline<MpmElasticParticle>,
+    rigid_pipeline: RigidBodyPipeline,
     marching_cubes: MarchingCubes,
     sph_screen_space: ScreenSpaceRendering<FluidParticle>,
     mpm_screen_space: ScreenSpaceRendering<MpmFluidParticle>,
@@ -308,7 +310,8 @@ impl<T: SimulationBackend> State<T> {
         let mpm_collider_wireframe =
             WireframeBox::new(&device, col_min, col_max, [0.35, 0.85, 1.0]);
 
-        let (mut fluid_particles, mpm_particles, mpm_elastic_particles) = T::into_particles(world);
+        let (mut fluid_particles, mpm_particles, mpm_elastic_particles, rigid_bodies) =
+            T::into_particles(world);
         let n_fluid = fluid_particles.len() as u32;
         if n_fluid > 0 {
             let container = ContainerBoundary {
@@ -338,7 +341,12 @@ impl<T: SimulationBackend> State<T> {
         }
 
         let fluid_sim = FluidSim::new(&device, &fluid_particles);
-        let mpm_fluid_sim = MpmFluidSim::new(&device, &mpm_particles, &mpm_elastic_particles);
+        let mpm_fluid_sim = MpmFluidSim::new(
+            &device,
+            &mpm_particles,
+            &mpm_elastic_particles,
+            &rigid_bodies,
+        );
         let fluid_pipeline = RenderPipeline::new(
             &device,
             &camera_bind_group_layout,
@@ -357,6 +365,8 @@ impl<T: SimulationBackend> State<T> {
             config.format,
             MPM_PARTICLE_RADIUS,
         );
+        let rigid_pipeline =
+            RigidBodyPipeline::new(&device, &camera_bind_group_layout, config.format);
         let marching_cubes = MarchingCubes::new(&device);
         let mc_pipeline =
             MarchingCubesRenderPipeline::new(&device, &camera_bind_group_layout, config.format);
@@ -399,6 +409,7 @@ impl<T: SimulationBackend> State<T> {
             fluid_pipeline,
             mpm_pipeline,
             mpm_elastic_pipeline,
+            rigid_pipeline,
             marching_cubes,
             mc_pipeline,
             camera,
@@ -619,10 +630,7 @@ impl<T: SimulationBackend + 'static> ApplicationHandler<State<T>> for App<T> {
         }
 
         let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
-        let world = self
-            .world
-            .take()
-            .expect("scene world already consumed");
+        let world = self.world.take().expect("scene world already consumed");
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -713,6 +721,7 @@ impl<T: SimulationBackend + 'static> ApplicationHandler<State<T>> for App<T> {
 
 pub fn run() -> anyhow::Result<()> {
     let mut scene = Scene::<Mpm>::new();
+    scene.add(RigidBox::new(MPM_BOX_CENTER, MPM_BOX_HALF));
     scene.add(FluidCube::new(MPM_BLOCK_N, MPM_SPACING, MPM_ORIGIN));
     scene.run()
 }

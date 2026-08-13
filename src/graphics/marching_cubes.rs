@@ -273,13 +273,7 @@ impl CompactIndices {
             pass.dispatch_workgroups(NUM_VOXELS.div_ceil(WG_SIZE), 1, 1);
         }
 
-        encoder.copy_buffer_to_buffer(
-            &self.offsets,
-            NUM_VOXELS as u64 * 4,
-            &self.indirect,
-            0,
-            4,
-        );
+        encoder.copy_buffer_to_buffer(&self.offsets, NUM_VOXELS as u64 * 4, &self.indirect, 0, 4);
     }
 
     fn index_buffer(&self) -> &wgpu::Buffer {

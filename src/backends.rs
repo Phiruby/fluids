@@ -1,5 +1,5 @@
-use crate::physics::{MpmWorld, SphWorld};
-use crate::{FluidRenderMode, MpmMaterial, State, FLUID_RENDER_MODE, MPM_MATERIAL};
+use crate::physics::{MpmWorld, RigidBody, SphWorld};
+use crate::{FLUID_RENDER_MODE, FluidRenderMode, MPM_MATERIAL, MpmMaterial, State};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SimBackend {
@@ -15,6 +15,7 @@ pub trait SimulationBackend {
         Vec<crate::physics::FluidParticle>,
         Vec<crate::physics::MpmFluidParticle>,
         Vec<crate::physics::MpmElasticParticle>,
+        Vec<RigidBody>,
     );
 
     fn simulate(state: &mut State<Self>, encoder: &mut wgpu::CommandEncoder)
@@ -23,11 +24,8 @@ pub trait SimulationBackend {
     {
         panic!("Not implemented");
     }
-    fn draw(
-        state: &mut State<Self>,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
-    ) where
+    fn draw(state: &mut State<Self>, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView)
+    where
         Self: Sized,
     {
         panic!("Not implemented");
@@ -45,8 +43,14 @@ impl SimulationBackend for Mpm {
         Vec<crate::physics::FluidParticle>,
         Vec<crate::physics::MpmFluidParticle>,
         Vec<crate::physics::MpmElasticParticle>,
+        Vec<RigidBody>,
     ) {
-        (Vec::new(), world.fluid_particles, world.elastic_particles)
+        (
+            Vec::new(),
+            world.fluid_particles,
+            world.elastic_particles,
+            world.rigid_bodies,
+        )
     }
 
     fn simulate(state: &mut State<Mpm>, encoder: &mut wgpu::CommandEncoder) {
@@ -137,6 +141,12 @@ impl SimulationBackend for Mpm {
                 &state.camera_bind_group,
                 &state.mpm_collider_wireframe,
             );
+            state.rigid_pipeline.draw(
+                &mut render_pass,
+                &state.camera_bind_group,
+                state.mpm_fluid_sim.rigid_buffer(),
+                state.mpm_fluid_sim.num_rigid_bodies(),
+            );
         }
     }
 }
@@ -150,8 +160,9 @@ impl SimulationBackend for Sph {
         Vec<crate::physics::FluidParticle>,
         Vec<crate::physics::MpmFluidParticle>,
         Vec<crate::physics::MpmElasticParticle>,
+        Vec<RigidBody>,
     ) {
-        (world.fluid_particles, Vec::new(), Vec::new())
+        (world.fluid_particles, Vec::new(), Vec::new(), Vec::new())
     }
 
     fn simulate(state: &mut State<Sph>, encoder: &mut wgpu::CommandEncoder) {

@@ -1,5 +1,5 @@
 use crate::graphics::{PipelineInfo, PipelineState, create_pipeline};
-use crate::physics::RenderParticle;
+use crate::physics::{RenderParticle, RigidBody};
 use std::marker::PhantomData;
 use wgpu::util::DeviceExt;
 
@@ -101,7 +101,7 @@ fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
     (vertices, indices)
 }
 
-/// draw particles as instanced cubes; 
+/// draw particles as instanced cubes;
 //  generic P provide instance layout + WGSL vertex fields (works for generic structs)
 pub struct RenderPipeline<P: RenderParticle> {
     pipeline: PipelineState,
@@ -329,5 +329,95 @@ impl WireframeBoxPipeline {
         self.pipeline.bind(render_pass, global_bind_group);
         render_pass.set_vertex_buffer(0, wireframe.vertex_buffer.slice(..));
         render_pass.draw(0..wireframe.num_vertices, 0..1);
+    }
+}
+
+pub struct RigidBodyPipeline {
+    pipeline: PipelineState,
+    mesh_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
+}
+
+impl RigidBodyPipeline {
+    pub fn new(
+        device: &wgpu::Device,
+        global_bind_group_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("rigid_render.wgsl"));
+        let instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<RigidBody>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: std::mem::offset_of!(RigidBody, position) as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::offset_of!(RigidBody, orientation) as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::offset_of!(RigidBody, params) as wgpu::BufferAddress,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        };
+        let pipeline = create_pipeline(
+            device,
+            &PipelineInfo {
+                shader: &shader,
+                vertex_entry_point: "vs_main",
+                fragment_entry_point: "fs_main",
+                primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+                global_bind_group_layout,
+                vertex_buffers: &[ParticleMeshVertex::layout(), instance_layout],
+                fragment_targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+            },
+        );
+        let (mesh, indices) = particle_cube(1.0);
+        let mesh_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Rigid mesh"),
+            contents: bytemuck::cast_slice(&mesh),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Rigid index"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Self {
+            pipeline,
+            mesh_buffer,
+            index_buffer,
+            num_indices: indices.len() as u32,
+        }
+    }
+
+    pub fn draw(
+        &self,
+        render_pass: &mut wgpu::RenderPass,
+        global_bind_group: &wgpu::BindGroup,
+        rigid_buffer: &wgpu::Buffer,
+        num_instances: u32,
+    ) {
+        if num_instances == 0 {
+            return;
+        }
+        self.pipeline.bind(render_pass, global_bind_group);
+        render_pass.set_vertex_buffer(0, self.mesh_buffer.slice(..));
+        render_pass.set_vertex_buffer(1, rigid_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.draw_indexed(0..self.num_indices, 0, 0..num_instances);
     }
 }

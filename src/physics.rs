@@ -6,7 +6,7 @@ use nalgebra::Vector3;
 use std::ops::Add;
 
 pub use mpm::{MpmFluidSim, mpm_collider_bounds, mpm_grid_bounds};
-pub use objects::{FluidCube, MpmObject, MpmWorld, SphObject, SphWorld};
+pub use objects::{FluidCube, MpmObject, MpmWorld, RigidBody, RigidBox, SphObject, SphWorld};
 pub(crate) use pipelines::PrefixSum;
 pub use sph::boundaries::ContainerBoundary;
 pub use sph::fluids::FluidSim;

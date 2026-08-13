@@ -1,7 +1,7 @@
 mod objects;
 
 use crate::load_wgsl;
-use crate::physics::{MpmElasticParticle, MpmFluidParticle, MpmGridNode};
+use crate::physics::{MpmElasticParticle, MpmFluidParticle, MpmGridNode, RigidBody};
 
 use wgpu::util::DeviceExt;
 
@@ -75,14 +75,15 @@ impl P2G {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let fluid_mass_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("p2g_mass"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("particles_to_grid"),
-            cache: Default::default(),
-            compilation_options: Default::default(),
-        });
+        let fluid_mass_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("p2g_mass"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("particles_to_grid"),
+                cache: Default::default(),
+                compilation_options: Default::default(),
+            });
         let elastic_mass_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("p2g_elastic_mass"),
@@ -202,7 +203,7 @@ struct ColliderUniform {
 
 impl GridSimulation {
     pub fn new(device: &wgpu::Device) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("mpm/grid_simulation.wgsl"));
+        let module = load_wgsl!(device, "src/physics/mpm/grid_simulation.wgsl");
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("run simulation"),
             entries: &[
@@ -221,6 +222,16 @@ impl GridSimulation {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -264,6 +275,7 @@ impl GridSimulation {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         grid: &wgpu::Buffer,
+        rigid_bodies: &wgpu::Buffer,
     ) {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("grid_sim"),
@@ -277,6 +289,10 @@ impl GridSimulation {
                     binding: 1,
                     resource: self.collider_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: rigid_bodies.as_entire_binding(),
+                },
             ],
         });
         let n_nodes = (N * N * N) as u32;
@@ -284,6 +300,88 @@ impl GridSimulation {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(n_nodes.div_ceil(WG_SIZE), 1, 1);
+    }
+}
+
+/// update rigid bodies based on accumulated force and torque in grid sim
+struct RigidUpdate {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+impl RigidUpdate {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let module = load_wgsl!(device, "src/physics/mpm/rigid_update.wgsl");
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rigid update"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rigid update"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("rigid_update"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("update_rigid_bodies"),
+            cache: Default::default(),
+            compilation_options: Default::default(),
+        });
+        Self { pipeline, layout }
+    }
+
+    pub fn compute(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        rigid_bodies: &wgpu::Buffer,
+        collider: &wgpu::Buffer,
+        num_rigid: u32,
+    ) {
+        if num_rigid == 0 {
+            return;
+        }
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rigid_update"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: rigid_bodies.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: collider.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(num_rigid.div_ceil(64), 1, 1);
     }
 }
 
@@ -418,41 +516,38 @@ impl G2P {
     }
 }
 
-fn particle_storage_buffer<T: bytemuck::Pod>(
+fn particle_storage_buffer<T: bytemuck::Pod + bytemuck::Zeroable>(
     device: &wgpu::Device,
     label: &str,
     particles: &[T],
 ) -> wgpu::Buffer {
-    if particles.is_empty() {
-        device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: size_of::<T>() as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        })
+    let dummy = T::zeroed();
+    let contents = if particles.is_empty() {
+        bytemuck::bytes_of(&dummy)
     } else {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::cast_slice(particles),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        })
-    }
+        bytemuck::cast_slice(particles)
+    };
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::VERTEX
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+    })
 }
 
 pub struct MpmFluidSim {
     p2g: P2G,
     grid_simulation: GridSimulation,
     g2p: G2P,
+    rigid_update: RigidUpdate,
     particles: wgpu::Buffer,
     elastic_particles: wgpu::Buffer,
+    rigid_bodies: wgpu::Buffer,
     num_particles: u32,
     num_elastic: u32,
+    num_rigid: u32,
 }
 
 impl MpmFluidSim {
@@ -460,25 +555,31 @@ impl MpmFluidSim {
         device: &wgpu::Device,
         particles: &[MpmFluidParticle],
         elastic_particles: &[MpmElasticParticle],
+        rigid_bodies: &[RigidBody],
     ) -> Self {
         let num_particles = particles.len() as u32;
         let num_elastic = elastic_particles.len() as u32;
+        let num_rigid = rigid_bodies.len() as u32;
         let particles = particle_storage_buffer(device, "mpm particles", particles);
         let elastic_particles =
             particle_storage_buffer(device, "mpm elastic particles", elastic_particles);
+        let rigid_bodies = particle_storage_buffer(device, "mpm rigid bodies", rigid_bodies);
         Self {
             p2g: P2G::new(device),
             grid_simulation: GridSimulation::new(device),
             g2p: G2P::new(device),
+            rigid_update: RigidUpdate::new(device),
             particles,
             elastic_particles,
+            rigid_bodies,
             num_particles,
             num_elastic,
+            num_rigid,
         }
     }
 
     pub fn step(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
-        if self.num_particles == 0 && self.num_elastic == 0 {
+        if self.num_particles == 0 && self.num_elastic == 0 && self.num_rigid == 0 {
             return;
         }
         const SUBSTEPS: u32 = 8;
@@ -498,7 +599,7 @@ impl MpmFluidSim {
             self.num_elastic,
         );
         self.grid_simulation
-            .compute(device, encoder, &self.p2g.grid);
+            .compute(device, encoder, &self.p2g.grid, &self.rigid_bodies);
         self.g2p.compute(
             device,
             encoder,
@@ -509,6 +610,13 @@ impl MpmFluidSim {
             self.num_particles,
             self.num_elastic,
         );
+        self.rigid_update.compute(
+            device,
+            encoder,
+            &self.rigid_bodies,
+            &self.grid_simulation.collider_buffer,
+            self.num_rigid,
+        );
     }
 
     pub fn particle_buffer(&self) -> &wgpu::Buffer {
@@ -517,6 +625,10 @@ impl MpmFluidSim {
 
     pub fn elastic_particle_buffer(&self) -> &wgpu::Buffer {
         &self.elastic_particles
+    }
+
+    pub fn rigid_buffer(&self) -> &wgpu::Buffer {
+        &self.rigid_bodies
     }
 
     pub fn grid_buffer(&self) -> &wgpu::Buffer {
@@ -529,6 +641,10 @@ impl MpmFluidSim {
 
     pub fn num_elastic_particles(&self) -> u32 {
         self.num_elastic
+    }
+
+    pub fn num_rigid_bodies(&self) -> u32 {
+        self.num_rigid
     }
 
     pub fn num_grid_nodes(&self) -> u32 {
