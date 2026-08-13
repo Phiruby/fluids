@@ -1,5 +1,10 @@
-use crate::physics::{InflowSource, MpmWorld, RigidBody, SphWorld};
+use crate::graphics::SCENE_CLEAR;
+use crate::physics::{InflowSource, MpmWorld, RigidBody, SphWorld, MpmFluidParticle, MpmElasticParticle, MpmFluidSim, MpmObject};
 use crate::{FLUID_RENDER_MODE, FluidRenderMode, MPM_MATERIAL, MpmMaterial, State};
+
+/// parked far from the domain so P2G/G2P skip them (x > 50 condition in shaders), but y < 0 so emit
+/// does not treat them as pipe reservoir particles.
+const PARK_HIDDEN: [f32; 3] = [1000.0, -1000.0, 1000.0];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SimBackend {
@@ -19,6 +24,11 @@ pub trait SimulationBackend {
         Vec<InflowSource>,
     );
 
+    fn finalize(world: Self::World, events: Vec<MpmSceneEvent>) -> (Self::World, MpmTimeline) {
+        let _ = events;
+        (world, MpmTimeline::default())
+    }
+
     fn simulate(state: &mut State<Self>, encoder: &mut wgpu::CommandEncoder)
     where
         Self: Sized,
@@ -33,11 +43,68 @@ pub trait SimulationBackend {
     }
 }
 
+pub enum MpmSceneEvent {
+    Add(Box<dyn MpmObject>),
+    Wait(f32),
+}
+
+struct DeferredSpawn {
+    at_time: f32,
+    rigids: Vec<(u32, RigidBody)>,
+    particles: Vec<(u32, MpmFluidParticle)>,
+}
+
+#[derive(Default)]
+pub struct MpmTimeline {
+    sim_time: f32,
+    pending: Vec<DeferredSpawn>,
+}
+
+
+impl MpmTimeline {
+    pub fn tick(&mut self, dt: f32, queue: &wgpu::Queue, sim: &MpmFluidSim) {
+        if self.pending.is_empty() {
+            return;
+        }
+        self.sim_time += dt;
+        let mut i = 0;
+        while i < self.pending.len() {
+            if self.sim_time + 1e-8 >= self.pending[i].at_time {
+                let spawn = self.pending.remove(i);
+                spawn.upload(queue, sim);
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+impl DeferredSpawn {
+    fn upload(&self, queue: &wgpu::Queue, sim: &MpmFluidSim) {
+        if !self.rigids.is_empty() {
+            let start = self.rigids[0].0;
+            let bodies: Vec<RigidBody> = self.rigids.iter().map(|(_, b)| *b).collect();
+            sim.write_rigid_bodies(queue, start, &bodies);
+        }
+        if !self.particles.is_empty() {
+            let start = self.particles[0].0;
+            let particles: Vec<MpmFluidParticle> = self.particles.iter().map(|(_, p)| *p).collect();
+            sim.write_fluid_particles(queue, start, &particles);
+        }
+    }
+}
+
+
 pub enum Mpm {}
 pub enum Sph {}
 
 impl SimulationBackend for Mpm {
     type World = MpmWorld;
+
+    fn finalize(world: MpmWorld, events: Vec<MpmSceneEvent>) -> (MpmWorld, MpmTimeline) {
+        bake_mpm(world, events)
+    }
+
     fn into_particles(
         world: Self::World,
     ) -> (
@@ -65,6 +132,7 @@ impl SimulationBackend for Mpm {
         {
             {
                 let mut pass = state.mpm_screen_space.begin_opaque_pass(encoder);
+                state.sky_pipeline.draw(&mut pass);
                 state.rigid_pipeline.draw(
                     &state.device,
                     &mut pass,
@@ -89,12 +157,7 @@ impl SimulationBackend for Mpm {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(SCENE_CLEAR),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -110,6 +173,8 @@ impl SimulationBackend for Mpm {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+
+            state.sky_pipeline.draw(&mut render_pass);
 
             match FLUID_RENDER_MODE {
                 FluidRenderMode::Particles => match MPM_MATERIAL {
@@ -203,7 +268,8 @@ impl SimulationBackend for Sph {
 
         if FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering {
             {
-                let _opaque = state.sph_screen_space.begin_opaque_pass(encoder);
+                let mut pass = state.sph_screen_space.begin_opaque_pass(encoder);
+                state.sky_pipeline.draw(&mut pass);
             }
             state.sph_screen_space.prepare(
                 &state.device,
@@ -221,12 +287,7 @@ impl SimulationBackend for Sph {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(SCENE_CLEAR),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -242,6 +303,8 @@ impl SimulationBackend for Sph {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+
+            state.sky_pipeline.draw(&mut render_pass);
 
             match FLUID_RENDER_MODE {
                 FluidRenderMode::Particles => {
@@ -276,5 +339,70 @@ impl SimulationBackend for Sph {
                 &state.sph_wireframe,
             );
         }
+    }
+}
+
+
+pub(crate) fn bake_mpm(mut world: MpmWorld, events: Vec<MpmSceneEvent>) -> (MpmWorld, MpmTimeline) {
+    let mut at_time = 0.0;
+    let mut pending = Vec::new();
+    for event in events {
+        match event {
+            MpmSceneEvent::Wait(seconds) => {
+                at_time += seconds.max(0.0);
+            }
+            MpmSceneEvent::Add(object) => {
+                let rigid_start = world.rigid_bodies.len();
+                let particle_start = world.fluid_particles.len();
+                object.insert(&mut world);
+                if at_time > 0.0 {
+                    pending.push(hide_inserted(
+                        &mut world,
+                        at_time,
+                        rigid_start,
+                        particle_start,
+                    ));
+                }
+            }
+        }
+    }
+    (
+        world,
+        MpmTimeline {
+            sim_time: 0.0,
+            pending,
+        },
+    )
+}
+
+fn hide_inserted(
+    world: &mut MpmWorld,
+    at_time: f32,
+    rigid_start: usize,
+    particle_start: usize,
+) -> DeferredSpawn {
+    let mut rigids = Vec::new();
+    let live = world.rigid_bodies[rigid_start];
+    rigids.push((rigid_start as u32, live));
+    let mut hidden = live;
+    hidden.position = PARK_HIDDEN;
+    hidden.pinned = 1;
+    hidden.inv_mass = 0.0;
+    hidden.v_cm = [0.0; 3];
+    hidden.omega = [0.0; 3];
+    hidden.operand = 1;
+    world.rigid_bodies[rigid_start] = hidden;
+
+    let mut particles = Vec::new();
+    for i in particle_start..world.fluid_particles.len() {
+        let live = world.fluid_particles[i];
+        particles.push((i as u32, live));
+        world.fluid_particles[i].position = PARK_HIDDEN;
+        world.fluid_particles[i].velocity = [0.0; 3];
+    }
+    DeferredSpawn {
+        at_time,
+        rigids,
+        particles,
     }
 }

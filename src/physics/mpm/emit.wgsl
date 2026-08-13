@@ -44,7 +44,10 @@ fn emit_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= arrayLength(&particles) { return; }
     var p = particles[idx];
-    if p.position.x <= 50.0 { return; }
+    // i know this is hacky; here's what its trying to do:
+    // reservoir fluid particles (i.e particles yet to be pumped) are stored at (1000, 1000, 1000).
+    // but rigid bodies waiting to be added to the scene are stored at (1000, -1000, 1000).
+    if p.position.x <= 50.0 || p.position.y <= 50.0 { return; }
 
     let nsrc = arrayLength(&sources);
     // TODO: this won't work for multiple sources
@@ -53,6 +56,8 @@ fn emit_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
         let flow = sources[s].flow;
         let fl = length(flow);
         if fl < 1e-8 { continue; }
+        if rigid_bodies[i].operand != 0u { continue; }
+        if rigid_bodies[i].position.x > 50.0 { continue; }
         let r = source_radius(i);
         let flux = 3.14159265 * r * r * fl * DT / (SPACING * SPACING * SPACING);
         let max_emit = max(u32(flux + 0.5), 1u);

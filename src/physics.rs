@@ -5,7 +5,10 @@ mod sph;
 use nalgebra::Vector3;
 use std::ops::Add;
 
-pub use mpm::{MPM_DX, MpmFluidSim, mpm_collider_bounds, mpm_grid_bounds};
+pub use mpm::{
+    MPM_BOTTOM_LEFT, MPM_DT, MPM_DX, MPM_N, MPM_SUBSTEPS, MpmFluidSim, mpm_collider_bounds,
+    mpm_frame_dt, mpm_grid_bounds,
+};
 pub use objects::{
     FluidCube, InflowSource, MpmObject, MpmWorld, RigidBody, RigidBox, RigidPipe, SphObject,
     SphWorld,

@@ -7,9 +7,18 @@ use wgpu::util::DeviceExt;
 
 pub use objects::mpm_collider_bounds;
 
-pub const MPM_N: u32 = 32;
+
+pub const MPM_N: u32 = 64;
 pub const MPM_DX: f32 = 0.02;
 pub const MPM_BOTTOM_LEFT: [f32; 3] = [0.0, 0.0, 0.0];
+
+// sync with sdf and g2p shaders
+pub const MPM_DT: f32 = 0.0001;
+pub const MPM_SUBSTEPS: u32 = 8;
+
+pub fn mpm_frame_dt() -> f32 {
+    MPM_DT * MPM_SUBSTEPS as f32
+}
 
 const N: u64 = MPM_N as u64;
 const WG_SIZE: u32 = 256;
@@ -34,7 +43,7 @@ struct P2G {
 
 impl P2G {
     pub fn new(device: &wgpu::Device) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("mpm/p2g.wgsl"));
+        let module = load_wgsl!(device, "src/physics/mpm/p2g.wgsl");
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("run simulation"),
             entries: &[
@@ -816,8 +825,7 @@ impl MpmFluidSim {
         if self.num_particles == 0 && self.num_elastic == 0 && self.num_rigid == 0 {
             return;
         }
-        const SUBSTEPS: u32 = 8;
-        for _ in 0..SUBSTEPS {
+        for _ in 0..MPM_SUBSTEPS {
             self.substep(device, encoder);
         }
     }
@@ -873,32 +881,52 @@ impl MpmFluidSim {
     pub fn particle_buffer(&self) -> &wgpu::Buffer {
         &self.particles
     }
-
     pub fn elastic_particle_buffer(&self) -> &wgpu::Buffer {
         &self.elastic_particles
     }
-
     pub fn rigid_buffer(&self) -> &wgpu::Buffer {
         &self.rigid_bodies
     }
-
     pub fn grid_buffer(&self) -> &wgpu::Buffer {
         &self.p2g.grid
     }
-
     pub fn num_particles(&self) -> u32 {
         self.num_particles
     }
-
     pub fn num_elastic_particles(&self) -> u32 {
         self.num_elastic
     }
-
     pub fn num_rigid_bodies(&self) -> u32 {
         self.num_rigid
     }
-
     pub fn num_grid_nodes(&self) -> u32 {
         (N * N * N) as u32
+    }
+
+    pub fn write_rigid_bodies(&self, queue: &wgpu::Queue, start: u32, bodies: &[RigidBody]) {
+        if bodies.is_empty() {
+            return;
+        }
+        queue.write_buffer(
+            &self.rigid_bodies,
+            start as u64 * std::mem::size_of::<RigidBody>() as u64,
+            bytemuck::cast_slice(bodies),
+        );
+    }
+
+    pub fn write_fluid_particles(
+        &self,
+        queue: &wgpu::Queue,
+        start: u32,
+        particles: &[MpmFluidParticle],
+    ) {
+        if particles.is_empty() {
+            return;
+        }
+        queue.write_buffer(
+            &self.particles,
+            start as u64 * std::mem::size_of::<MpmFluidParticle>() as u64,
+            bytemuck::cast_slice(particles),
+        );
     }
 }

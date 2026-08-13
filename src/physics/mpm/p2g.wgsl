@@ -1,3 +1,4 @@
+#include <constants.wgsl>
 struct Particle {
     deformation_gradient: mat3x3<f32>,
     B: mat3x3<f32>,
@@ -29,9 +30,6 @@ struct GridParticle {
     force_z: atomic<u32>,
 }
 
-const DX: f32 = 0.02;
-const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const N: u32 = 32u;
 const D_INV = 4.0 / (DX * DX);
 const EOS_STIFFNESS = 100000.0;
 const EOS_POWER = 7.0;

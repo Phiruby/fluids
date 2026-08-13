@@ -7,11 +7,18 @@ mod ssfr;
 use flume::bounded;
 pub use marching_cubes::MarchingCubes;
 pub use pipelines::{
-    MarchingCubesRenderPipeline, RenderPipeline, RigidBodyPipeline, WireframeBox,
+    MarchingCubesRenderPipeline, RenderPipeline, RigidBodyPipeline, SkyPipeline, WireframeBox,
     WireframeBoxPipeline,
 };
 pub use ssfr::ScreenSpaceRendering;
 use std::fmt::Debug;
+
+pub const SCENE_CLEAR: wgpu::Color = wgpu::Color {
+    r: 0.88,
+    g: 0.82,
+    b: 0.74,
+    a: 1.0,
+};
 
 pub(in crate::graphics) struct PipelineInfo<'a> {
     shader: &'a wgpu::ShaderModule,

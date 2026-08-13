@@ -57,10 +57,14 @@ pub struct FluidCube {
 
 impl FluidCube {
     pub fn new(n: usize, spacing: f32, origin: [f32; 3]) -> Self {
+        Self::block(n, n, n, spacing, origin)
+    }
+
+    pub fn block(nx: usize, ny: usize, nz: usize, spacing: f32, origin: [f32; 3]) -> Self {
         Self {
-            nx: n,
-            ny: n,
-            nz: n,
+            nx,
+            ny,
+            nz,
             spacing,
             origin,
         }

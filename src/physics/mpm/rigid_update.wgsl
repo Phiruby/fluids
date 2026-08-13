@@ -10,27 +10,97 @@ struct ColliderUniform {
 
 #include <../objects/sdf_eval.wgsl>
 
-fn quat_to_mat3(q: vec4<f32>) -> mat3x3<f32> {
-    return mat3x3<f32>(
-        quat_rotate(q, vec3<f32>(1.0, 0.0, 0.0)),
-        quat_rotate(q, vec3<f32>(0.0, 1.0, 0.0)),
-        quat_rotate(q, vec3<f32>(0.0, 0.0, 1.0)),
-    );
-}
-
-fn world_aabb_extent(q: vec4<f32>, h: vec3<f32>) -> vec3<f32> {
-    let m = quat_to_mat3(q);
-    return vec3<f32>(
-        abs(m[0].x) * h.x + abs(m[1].x) * h.y + abs(m[2].x) * h.z,
-        abs(m[0].y) * h.x + abs(m[1].y) * h.y + abs(m[2].y) * h.z,
-        abs(m[0].z) * h.x + abs(m[1].z) * h.y + abs(m[2].z) * h.z,
-    );
-}
+const WALL_MU = 0.4;
 
 fn apply_inv_inertia(q: vec4<f32>, inv_i: vec3<f32>, torque: vec3<f32>) -> vec3<f32> {
-    // inv_i is in body frame. need to convert
     let t_body = quat_rotate(quat_conj(q), torque);
     return quat_rotate(q, t_body * inv_i);
+}
+
+fn invert3(m: mat3x3<f32>) -> mat3x3<f32> {
+    let a = m[0];
+    let b = m[1];
+    let c = m[2];
+    let r0 = cross(b, c);
+    let det = dot(a, r0);
+    if abs(det) < 1e-8 {
+        return mat3x3<f32>(
+            vec3<f32>(1.0, 0.0, 0.0),
+            vec3<f32>(0.0, 1.0, 0.0),
+            vec3<f32>(0.0, 0.0, 1.0),
+        );
+    }
+    let r1 = cross(c, a);
+    let r2 = cross(a, b);
+    let inv_det = 1.0 / det;
+    return transpose(mat3x3<f32>(r0 * inv_det, r1 * inv_det, r2 * inv_det));
+}
+
+fn apply_k(J: vec3<f32>, r: vec3<f32>, q: vec4<f32>, inv_mass: f32, inv_i: vec3<f32>) -> vec3<f32> {
+    return J * inv_mass + cross(apply_inv_inertia(q, inv_i, cross(r, J)), r);
+}
+
+fn impulse_from_dv(dv: vec3<f32>, r: vec3<f32>, q: vec4<f32>, inv_mass: f32, inv_i: vec3<f32>) -> vec3<f32> {
+    let k = mat3x3<f32>(
+        apply_k(vec3<f32>(1.0, 0.0, 0.0), r, q, inv_mass, inv_i),
+        apply_k(vec3<f32>(0.0, 1.0, 0.0), r, q, inv_mass, inv_i),
+        apply_k(vec3<f32>(0.0, 0.0, 1.0), r, q, inv_mass, inv_i),
+    );
+    return invert3(k) * dv;
+}
+
+fn sample_local(h: vec3<f32>, k: u32) -> vec3<f32> {
+    // 8 AABB corners, then 6 face centers — contact at the body's edges/faces
+    switch k {
+        case 0u: { return vec3<f32>(-h.x, -h.y, -h.z); }
+        case 1u: { return vec3<f32>( h.x, -h.y, -h.z); }
+        case 2u: { return vec3<f32>(-h.x,  h.y, -h.z); }
+        case 3u: { return vec3<f32>( h.x,  h.y, -h.z); }
+        case 4u: { return vec3<f32>(-h.x, -h.y,  h.z); }
+        case 5u: { return vec3<f32>( h.x, -h.y,  h.z); }
+        case 6u: { return vec3<f32>(-h.x,  h.y,  h.z); }
+        case 7u: { return vec3<f32>( h.x,  h.y,  h.z); }
+        case 8u: { return vec3<f32>( h.x, 0.0, 0.0); }
+        case 9u: { return vec3<f32>(-h.x, 0.0, 0.0); }
+        case 10u: { return vec3<f32>(0.0,  h.y, 0.0); }
+        case 11u: { return vec3<f32>(0.0, -h.y, 0.0); }
+        case 12u: { return vec3<f32>(0.0, 0.0,  h.z); }
+        default: { return vec3<f32>(0.0, 0.0, -h.z); }
+    }
+}
+
+fn collide_sample(
+    p: vec3<f32>,
+    r: vec3<f32>,
+    q: vec4<f32>,
+    inv_mass: f32,
+    inv_i: vec3<f32>,
+    v: ptr<function, vec3<f32>>,
+    w: ptr<function, vec3<f32>>,
+) {
+    let clamped = clamp(p, collider.min, collider.max);
+    let delta = p - clamped;
+    let d2 = dot(delta, delta);
+    if d2 < 1e-12 {
+        return;
+    }
+    let n = -delta / sqrt(d2);
+    let v_p = *v + cross(*w, r);
+    let vn = dot(v_p, n);
+    if vn >= 0.0 {
+        return;
+    }
+    let vt = v_p - vn * n;
+    let vt_len = length(vt);
+    var v_new: vec3<f32>;
+    if vt_len <= -WALL_MU * vn {
+        v_new = vec3<f32>(0.0);
+    } else {
+        v_new = vt + WALL_MU * vn * vt / vt_len;
+    }
+    let J = impulse_from_dv(v_new - v_p, r, q, inv_mass, inv_i);
+    *v += J * inv_mass;
+    *w += apply_inv_inertia(q, inv_i, cross(r, J));
 }
 
 // TODO: no need for atomics here. Can make redefinition of RigidBody struct here
@@ -89,16 +159,17 @@ fn update_rigid_bodies(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     q = normalize(quat_mul(dq, q));
 
-    let extent = world_aabb_extent(q, h);
-    let lo = collider.min + extent;
-    let hi = collider.max - extent;
-    // NOTE: this could be better (e.g transferring momentum for bounce?)
-    if pos.x < lo.x { pos.x = lo.x; if v.x < 0.0 { v.x = 0.0; } }
-    if pos.x > hi.x { pos.x = hi.x; if v.x > 0.0 { v.x = 0.0; } }
-    if pos.y < lo.y { pos.y = lo.y; if v.y < 0.0 { v.y = 0.0; } }
-    if pos.y > hi.y { pos.y = hi.y; if v.y > 0.0 { v.y = 0.0; } }
-    if pos.z < lo.z { pos.z = lo.z; if v.z < 0.0 { v.z = 0.0; } }
-    if pos.z > hi.z { pos.z = hi.z; if v.z > 0.0 { v.z = 0.0; } }
+    var corr_lo = vec3<f32>(0.0);
+    var corr_hi = vec3<f32>(0.0);
+    for (var k = 0u; k < 14u; k++) {
+        let local = sample_local(h, k);
+        let r = quat_rotate(q, local);
+        let p = pos + r;
+        corr_lo = max(corr_lo, collider.min - p);
+        corr_hi = max(corr_hi, p - collider.max);
+        collide_sample(p, r, q, inv_mass, inv_i, &v, &w);
+    }
+    pos += max(corr_lo, vec3<f32>(0.0)) - max(corr_hi, vec3<f32>(0.0));
 
     rigid_bodies[i].position = pos;
     rigid_bodies[i].orientation = q;

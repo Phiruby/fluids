@@ -25,6 +25,9 @@ struct RigidBody {
     torque_x: atomic<u32>,
     torque_y: atomic<u32>,
     torque_z: atomic<u32>,
+    color_r: f32,
+    color_g: f32,
+    color_b: f32,
 }
 
 struct InflowSource {

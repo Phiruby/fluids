@@ -16,8 +16,8 @@ struct CameraUniform {
 
 const N1 = 1.0;
 const N2 = 1.33; // water
-const LIGHT_POS_WORLD = vec3<f32>(0.5, 2.0, 1.5);
-const FLUID_COLOR = vec3<f32>(0.05, 0.35, 0.75);
+const LIGHT_POS_WORLD = vec3<f32>(1.1, 2.6, 2.0);
+const FLUID_COLOR = vec3<f32>(0.05, 0.42, 0.72);
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -90,7 +90,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     // Eq (13)
     // NOTE: reflected is placeholder env reflection
-    let reflected = vec3<f32>(0.15, 0.18, 0.22);
+    let reflected = vec3<f32>(0.82, 0.74, 0.62);
     let cout = (a) * (1.0 - f_val) + reflected * f_val + specular;
 
     return vec4(cout, 1.0);

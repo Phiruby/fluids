@@ -27,6 +27,9 @@ struct RigidBody {
     torque_x: u32,
     torque_y: u32,
     torque_z: u32,
+    color_r: f32,
+    color_g: f32,
+    color_b: f32,
 }
 
 @group(0) @binding(0)
@@ -152,7 +155,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         sdf_at(in.body, p + vec3<f32>(0.0, e, 0.0)) - sdf_at(in.body, p - vec3<f32>(0.0, e, 0.0)),
         sdf_at(in.body, p + vec3<f32>(0.0, 0.0, e)) - sdf_at(in.body, p - vec3<f32>(0.0, 0.0, e)),
     ));
-    let light_dir = normalize(vec3<f32>(0.35, 0.7, 0.6));
-    let lighting = 0.24 + 0.76 * max(dot(n, light_dir), 0.0);
-    return vec4<f32>(vec3<f32>(0.72, 0.48, 0.28) * lighting, 1.0);
+    let light_dir = normalize(vec3<f32>(0.35, 0.85, 0.45));
+    let fill = normalize(vec3<f32>(-0.45, 0.25, -0.35));
+    let lighting = 0.16 + 0.72 * max(dot(n, light_dir), 0.0) + 0.20 * max(dot(n, fill), 0.0);
+    let albedo = vec3<f32>(
+        rigid_bodies[in.body].color_r,
+        rigid_bodies[in.body].color_g,
+        rigid_bodies[in.body].color_b,
+    );
+    return vec4<f32>(albedo * lighting, 1.0);
 }

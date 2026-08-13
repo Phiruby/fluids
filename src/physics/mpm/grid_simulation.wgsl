@@ -1,4 +1,5 @@
 #include <../objects/sdf.wgsl>
+#include <constants.wgsl>
 
 struct GridParticle {
     momentum_x: f32,
@@ -15,9 +16,6 @@ struct ColliderUniform {
     max: vec3<f32>,
 }
 
-const DX: f32 = 0.02;
-const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const N: u32 = 32u;
 
 @group(0) @binding(0) var<storage, read_write> grid: array<GridParticle>;
 @group(0) @binding(1) var<uniform> collider: ColliderUniform;

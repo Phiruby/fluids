@@ -58,11 +58,9 @@ pub struct RigidBody {
     pub omega: [f32; 3],
     pub inv_mass: f32,
     pub inv_inertia: [f32; 3],
-    _pad1: f32,
     pub force: [f32; 3],
-    _pad2: f32,
     pub torque: [f32; 3],
-    _pad3: f32,
+    pub color: [f32; 3],
 }
 
 /// for particle flow (e.g pipe pushing water)
@@ -91,19 +89,24 @@ impl Default for RigidBody {
             omega: [0.0; 3],
             inv_mass: 1.0,
             inv_inertia: [1.0; 3],
-            _pad1: 0.0,
             force: [0.0; 3],
-            _pad2: 0.0,
             torque: [0.0; 3],
-            _pad3: 0.0,
+            color: [0.78, 0.58, 0.42],
         }
     }
 }
+
+const _: () = assert!(std::mem::size_of::<RigidBody>() == 144);
 
 impl RigidBody {
     pub fn pinned(mut self) -> Self {
         self.pinned = 1;
         self.inv_mass = 0.0;
+        self
+    }
+
+    pub fn with_color(mut self, color: [f32; 3]) -> Self {
+        self.color = color;
         self
     }
 }
@@ -213,6 +216,7 @@ pub struct RigidBox {
     pub half_extents: [f32; 3],
     pub mass: f32,
     pub pin: bool,
+    pub color: [f32; 3],
 }
 
 impl RigidBox {
@@ -223,11 +227,28 @@ impl RigidBox {
             half_extents,
             mass: 100.0 * vol,
             pin: false,
+            color: [0.78, 0.58, 0.42],
         }
     }
 
     pub fn pinned(mut self) -> Self {
         self.pin = true;
+        self
+    }
+
+    pub fn with_density(mut self, density: f32) -> Self {
+        let vol = 8.0 * self.half_extents[0] * self.half_extents[1] * self.half_extents[2];
+        self.mass = density * vol;
+        self
+    }
+
+    pub fn with_mass(mut self, mass: f32) -> Self {
+        self.mass = mass;
+        self
+    }
+
+    pub fn with_color(mut self, color: [f32; 3]) -> Self {
+        self.color = color;
         self
     }
 }
@@ -238,6 +259,7 @@ impl MpmObject for RigidBox {
             half_extents: self.half_extents,
         }
         .push_into(world, self.center, [0.0, 0.0, 0.0, 1.0], self.mass);
+        world.rigid_bodies[i as usize].color = self.color;
         if self.pin {
             world.rigid_bodies[i as usize] = world.rigid_bodies[i as usize].pinned();
         }
@@ -255,6 +277,8 @@ pub struct RigidPipe {
     pub flow: [f32; 3],
     pub pin: bool,
     pub particle_spacing: f32,
+    pub color: [f32; 3],
+    pub particle_count: usize,
 }
 
 impl RigidPipe {
@@ -268,6 +292,8 @@ impl RigidPipe {
             flow: [0.0, 0.0, 0.0],
             pin: false,
             particle_spacing: 0.01,
+            color: [0.62, 0.66, 0.70],
+            particle_count: PIPE_FLUID_N * PIPE_FLUID_N * PIPE_FLUID_N,
         }
     }
 
@@ -278,6 +304,21 @@ impl RigidPipe {
 
     pub fn with_flow(mut self, flow: [f32; 3]) -> Self {
         self.flow = flow;
+        self
+    }
+
+    pub fn with_orientation(mut self, orientation: [f32; 4]) -> Self {
+        self.orientation = orientation;
+        self
+    }
+
+    pub fn with_color(mut self, color: [f32; 3]) -> Self {
+        self.color = color;
+        self
+    }
+
+    pub fn with_particle_count(mut self, count: usize) -> Self {
+        self.particle_count = count;
         self
     }
 }
@@ -369,6 +410,7 @@ impl MpmObject for RigidPipe {
         if self.pin {
             world.rigid_bodies[i as usize] = world.rigid_bodies[i as usize].pinned();
         }
+        world.rigid_bodies[i as usize].color = self.color;
         if self.flow[0] * self.flow[0] + self.flow[1] * self.flow[1] + self.flow[2] * self.flow[2]
             > 1e-16
         {
@@ -390,7 +432,7 @@ impl MpmObject for RigidPipe {
         let rest_volume = self.particle_spacing.powi(3);
         let mass = 1000.0 * rest_volume;
         let rest_density = mpm_lattice_rest_density(self.particle_spacing, mass, MPM_DX);
-        let target = PIPE_FLUID_N * PIPE_FLUID_N * PIPE_FLUID_N;
+        let target = self.particle_count.max(particles.len());
         // fill with particles waiting to be pumped
         particles.resize(
             target,
