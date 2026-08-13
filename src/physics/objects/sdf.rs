@@ -1,4 +1,5 @@
 use super::{MpmObject, MpmWorld};
+use crate::physics::{MPM_DX, MpmFluidParticle, mpm_lattice_rest_density};
 
 /// store a list of analytical sdfs supported.
 /// all shapes' sdf will be constructed w.r.t origin;
@@ -12,12 +13,31 @@ impl SdfType {
     pub const SPHERE: Self = SdfType(0);
     pub const CYLINDER: Self = SdfType(1);
     pub const BOX: Self = SdfType(2);
+    pub const DIFFERENCE: Self = SdfType(3);
 }
 
 pub enum AnalyticalSdf {
     Sphere(f32),
-    Cylinder { radius: f32, height: f32 },
-    Box { half_extents: [f32; 3] },
+    Cylinder {
+        radius: f32,
+        height: f32,
+    },
+    Box {
+        half_extents: [f32; 3],
+    },
+    Difference {
+        a: Box<AnalyticalSdf>,
+        b: Box<AnalyticalSdf>,
+    },
+}
+
+impl AnalyticalSdf {
+    pub fn subtract(self, other: Self) -> Self {
+        Self::Difference {
+            a: Box::new(self),
+            b: Box::new(other),
+        }
+    }
 }
 
 #[repr(C)]
@@ -25,10 +45,13 @@ pub enum AnalyticalSdf {
 pub struct RigidBody {
     pub object_type: SdfType,
     pub invert: u32,
-    _pad0: [u32; 2],
+    pub pinned: u32,
+    /// if 1, implies the body is part of operand (such as ::DIFFERENCE)
+    pub operand: u32,
     pub position: [f32; 3],
     pub scale: f32,
     pub orientation: [f32; 4],
+    /// params for your shape. expected values should be referred by the specific sdf implementation
     pub params: [f32; 4],
     pub v_cm: [f32; 3],
     pub mass: f32,
@@ -42,12 +65,23 @@ pub struct RigidBody {
     _pad3: f32,
 }
 
+/// for particle flow (e.g pipe pushing water)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct InflowSource {
+    pub body: u32,
+    _pad: [u32; 3],
+    pub flow: [f32; 3],
+    _pad1: f32,
+}
+
 impl Default for RigidBody {
     fn default() -> Self {
         Self {
             object_type: SdfType::SPHERE,
             invert: 0,
-            _pad0: [0; 2],
+            pinned: 0,
+            operand: 0,
             position: [0.0; 3],
             scale: 1.0,
             orientation: [0.0, 0.0, 0.0, 1.0],
@@ -66,6 +100,14 @@ impl Default for RigidBody {
     }
 }
 
+impl RigidBody {
+    pub fn pinned(mut self) -> Self {
+        self.pinned = 1;
+        self.inv_mass = 0.0;
+        self
+    }
+}
+
 fn box_inv_inertia(mass: f32, h: [f32; 3]) -> [f32; 3] {
     let ixx = mass / 3.0 * (h[1] * h[1] + h[2] * h[2]);
     let iyy = mass / 3.0 * (h[0] * h[0] + h[2] * h[2]);
@@ -77,54 +119,92 @@ fn box_inv_inertia(mass: f32, h: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-impl AnalyticalSdf {
-    pub fn to_rigid_body(self, position: [f32; 3], orientation: [f32; 4], mass: f32) -> RigidBody {
-        let inv_mass = if mass > 1e-8 { 1.0 / mass } else { 0.0 };
-        match self {
-            AnalyticalSdf::Sphere(radius) => {
-                let i = 0.4 * mass * radius * radius;
-                RigidBody {
-                    object_type: SdfType::SPHERE,
-                    position,
-                    scale: radius,
-                    orientation,
-                    params: [radius, radius, radius, 0.0],
-                    mass,
-                    inv_mass,
-                    inv_inertia: [1.0 / i.max(1e-8); 3],
-                    ..Default::default()
-                }
-            }
-            AnalyticalSdf::Cylinder { radius, height } => {
-                let h = height * 0.5;
-                let iyy = 0.5 * mass * radius * radius;
-                let ixx = mass / 12.0 * (3.0 * radius * radius + height * height);
-                RigidBody {
-                    object_type: SdfType::CYLINDER,
-                    position,
-                    orientation,
-                    params: [radius, h, radius, 0.0],
-                    mass,
-                    inv_mass,
-                    inv_inertia: [
-                        1.0 / ixx.max(1e-8),
-                        1.0 / iyy.max(1e-8),
-                        1.0 / ixx.max(1e-8),
-                    ],
-                    ..Default::default()
-                }
-            }
-            AnalyticalSdf::Box { half_extents } => RigidBody {
-                object_type: SdfType::BOX,
+fn primitive_to_gpu(
+    sdf: &AnalyticalSdf,
+    position: [f32; 3],
+    orientation: [f32; 4],
+    mass: f32,
+) -> RigidBody {
+    let inv_mass = if mass > 1e-8 { 1.0 / mass } else { 0.0 };
+    match sdf {
+        AnalyticalSdf::Sphere(radius) => {
+            let i = 0.4 * mass * radius * radius;
+            RigidBody {
+                object_type: SdfType::SPHERE,
                 position,
+                scale: *radius,
                 orientation,
-                params: [half_extents[0], half_extents[1], half_extents[2], 0.0],
+                params: [*radius, *radius, *radius, 0.0],
                 mass,
                 inv_mass,
-                inv_inertia: box_inv_inertia(mass, half_extents),
+                inv_inertia: [1.0 / i.max(1e-8); 3],
                 ..Default::default()
-            },
+            }
         }
+        AnalyticalSdf::Cylinder { radius, height } => {
+            let h = height * 0.5;
+            let iyy = 0.5 * mass * radius * radius;
+            let ixx = mass / 12.0 * (3.0 * radius * radius + height * height);
+            RigidBody {
+                object_type: SdfType::CYLINDER,
+                position,
+                orientation,
+                params: [*radius, h, *radius, 0.0],
+                mass,
+                inv_mass,
+                inv_inertia: [
+                    1.0 / ixx.max(1e-8),
+                    1.0 / iyy.max(1e-8),
+                    1.0 / ixx.max(1e-8),
+                ],
+                ..Default::default()
+            }
+        }
+        AnalyticalSdf::Box { half_extents } => RigidBody {
+            object_type: SdfType::BOX,
+            position,
+            orientation,
+            params: [half_extents[0], half_extents[1], half_extents[2], 0.0],
+            mass,
+            inv_mass,
+            inv_inertia: box_inv_inertia(mass, *half_extents),
+            ..Default::default()
+        },
+        AnalyticalSdf::Difference { .. } => panic!("child must be a primitive"),
+    }
+}
+
+/// push the sdf under the assumption that the sdf is an operand (e.g part of ::difference of SdfType)
+fn push_operand(sdf: &AnalyticalSdf, world: &mut MpmWorld) -> u32 {
+    let mut rb = primitive_to_gpu(sdf, [0.0; 3], [0.0, 0.0, 0.0, 1.0], 0.0);
+    rb.operand = 1;
+    rb.mass = 0.0;
+    rb.inv_mass = 0.0;
+    world.rigid_bodies.push(rb);
+    (world.rigid_bodies.len() - 1) as u32
+}
+
+impl AnalyticalSdf {
+    fn push_into(
+        self,
+        world: &mut MpmWorld,
+        position: [f32; 3],
+        orientation: [f32; 4],
+        mass: f32,
+    ) -> u32 {
+        let rb = match self {
+            AnalyticalSdf::Difference { a, b } => {
+                let mut rb = primitive_to_gpu(&a, position, orientation, mass);
+                let ia = push_operand(&a, world);
+                let ib = push_operand(&b, world);
+                rb.object_type = SdfType::DIFFERENCE;
+                rb.params = [ia as f32, ib as f32, 0.0, 0.0];
+                rb
+            }
+            other => primitive_to_gpu(&other, position, orientation, mass),
+        };
+        world.rigid_bodies.push(rb);
+        (world.rigid_bodies.len() - 1) as u32
     }
 }
 
@@ -132,6 +212,7 @@ pub struct RigidBox {
     pub center: [f32; 3],
     pub half_extents: [f32; 3],
     pub mass: f32,
+    pub pin: bool,
 }
 
 impl RigidBox {
@@ -140,18 +221,186 @@ impl RigidBox {
         Self {
             center,
             half_extents,
-            mass: 2000.0 * vol,
+            mass: 100.0 * vol,
+            pin: false,
         }
+    }
+
+    pub fn pinned(mut self) -> Self {
+        self.pin = true;
+        self
     }
 }
 
 impl MpmObject for RigidBox {
     fn insert(&self, world: &mut MpmWorld) {
-        world.rigid_bodies.push(
-            AnalyticalSdf::Box {
-                half_extents: self.half_extents,
+        let i = AnalyticalSdf::Box {
+            half_extents: self.half_extents,
+        }
+        .push_into(world, self.center, [0.0, 0.0, 0.0, 1.0], self.mass);
+        if self.pin {
+            world.rigid_bodies[i as usize] = world.rigid_bodies[i as usize].pinned();
+        }
+    }
+}
+
+const PIPE_FLUID_N: usize = 32;
+
+pub struct RigidPipe {
+    pub center: [f32; 3],
+    pub outer_radius: f32,
+    pub inner_radius: f32,
+    pub height: f32,
+    pub orientation: [f32; 4],
+    pub flow: [f32; 3],
+    pub pin: bool,
+    pub particle_spacing: f32,
+}
+
+impl RigidPipe {
+    pub fn new(center: [f32; 3], outer_radius: f32, inner_radius: f32, height: f32) -> Self {
+        Self {
+            center,
+            outer_radius,
+            inner_radius,
+            height,
+            orientation: [0.0, 0.0, 0.0, 1.0],
+            flow: [0.0, 0.0, 0.0],
+            pin: false,
+            particle_spacing: 0.01,
+        }
+    }
+
+    pub fn pinned(mut self) -> Self {
+        self.pin = true;
+        self
+    }
+
+    pub fn with_flow(mut self, flow: [f32; 3]) -> Self {
+        self.flow = flow;
+        self
+    }
+}
+
+fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let u = [q[0], q[1], q[2]];
+    let s = q[3];
+    let uv_cross = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let t = [uv_cross[0] * 2.0, uv_cross[1] * 2.0, uv_cross[2] * 2.0];
+    let ut_cross = [
+        u[1] * t[2] - u[2] * t[1],
+        u[2] * t[0] - u[0] * t[2],
+        u[0] * t[1] - u[1] * t[0],
+    ];
+    [
+        v[0] + s * t[0] + ut_cross[0],
+        v[1] + s * t[1] + ut_cross[1],
+        v[2] + s * t[2] + ut_cross[2],
+    ]
+}
+
+fn fluid_in_cylinder(
+    center: [f32; 3],
+    orientation: [f32; 4],
+    radius: f32,
+    half_h: f32,
+    spacing: f32,
+    flow: [f32; 3],
+) -> Vec<MpmFluidParticle> {
+    let rest_volume = spacing * spacing * spacing;
+    let mass = 1000.0 * rest_volume;
+    let rest_density = mpm_lattice_rest_density(spacing, mass, MPM_DX);
+    let velocity = quat_rotate(orientation, flow);
+    let flow_len = (flow[0] * flow[0] + flow[1] * flow[1] + flow[2] * flow[2]).sqrt();
+    let n_r = ((radius * 2.0) / spacing).ceil() as i32;
+    let n_y = ((half_h * 2.0) / spacing).ceil() as i32;
+    let mut particles = Vec::new();
+    for iy in -n_y..=n_y {
+        for ix in -n_r..=n_r {
+            for iz in -n_r..=n_r {
+                let local = [
+                    ix as f32 * spacing,
+                    iy as f32 * spacing,
+                    iz as f32 * spacing,
+                ];
+                if local[0] * local[0] + local[2] * local[2] > radius * radius * 0.85 {
+                    continue;
+                }
+                if local[1].abs() > half_h * 0.9 {
+                    continue;
+                }
+                let w = quat_rotate(orientation, local);
+                particles.push(MpmFluidParticle {
+                    position: [center[0] + w[0], center[1] + w[1], center[2] + w[2]],
+                    velocity,
+                    rest_density,
+                    mass,
+                    ..Default::default()
+                });
             }
-            .to_rigid_body(self.center, [0.0, 0.0, 0.0, 1.0], self.mass),
+        }
+    }
+    particles
+}
+
+impl MpmObject for RigidPipe {
+    fn insert(&self, world: &mut MpmWorld) {
+        let vol = std::f32::consts::PI
+            * (self.outer_radius * self.outer_radius - self.inner_radius * self.inner_radius)
+            * self.height;
+        let i = AnalyticalSdf::Cylinder {
+            radius: self.outer_radius,
+            height: self.height,
+        }
+        .subtract(AnalyticalSdf::Cylinder {
+            radius: self.inner_radius,
+            height: self.height * 1.2,
+        })
+        .push_into(
+            world,
+            self.center,
+            self.orientation,
+            (2000.0 * vol).max(0.1),
         );
+        if self.pin {
+            world.rigid_bodies[i as usize] = world.rigid_bodies[i as usize].pinned();
+        }
+        if self.flow[0] * self.flow[0] + self.flow[1] * self.flow[1] + self.flow[2] * self.flow[2]
+            > 1e-16
+        {
+            world.inflow_sources.push(InflowSource {
+                body: i,
+                _pad: [0; 3],
+                flow: self.flow,
+                _pad1: 0.0,
+            });
+        }
+        let mut particles = fluid_in_cylinder(
+            self.center,
+            self.orientation,
+            self.inner_radius,
+            self.height * 0.5,
+            self.particle_spacing,
+            self.flow,
+        );
+        let rest_volume = self.particle_spacing.powi(3);
+        let mass = 1000.0 * rest_volume;
+        let rest_density = mpm_lattice_rest_density(self.particle_spacing, mass, MPM_DX);
+        let target = PIPE_FLUID_N * PIPE_FLUID_N * PIPE_FLUID_N;
+        // fill with particles waiting to be pumped
+        particles.resize(
+            target,
+            MpmFluidParticle {
+                position: [1000.0, 1000.0, 1000.0],
+                rest_density,
+                mass,
+                ..Default::default()
+            },
+        );
+        world.fluid_particles.extend(particles);
     }
 }

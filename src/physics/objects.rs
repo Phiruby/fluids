@@ -3,12 +3,13 @@ use crate::physics::{
 };
 mod sdf;
 use nalgebra::Vector3;
-pub use sdf::{RigidBody, RigidBox};
+pub use sdf::{InflowSource, RigidBody, RigidBox, RigidPipe};
 
 pub struct MpmWorld {
     pub elastic_particles: Vec<MpmElasticParticle>,
     pub fluid_particles: Vec<MpmFluidParticle>,
     pub rigid_bodies: Vec<RigidBody>,
+    pub inflow_sources: Vec<InflowSource>,
 }
 
 impl Default for MpmWorld {
@@ -17,6 +18,7 @@ impl Default for MpmWorld {
             elastic_particles: Vec::new(),
             fluid_particles: Vec::new(),
             rigid_bodies: Vec::new(),
+            inflow_sources: Vec::new(),
         }
     }
 }

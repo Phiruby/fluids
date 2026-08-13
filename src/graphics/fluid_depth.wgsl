@@ -34,7 +34,14 @@ struct FragmentOutput {
 @vertex
 fn vertex_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let world_pos = vec4<f32>(particles[input.instance_idx].position, 1.0);
+    let p = particles[input.instance_idx].position;
+    // out-of-scene particles (e.g fluid particles waiting to be pumped in) are not drawn
+    if p.x > 50.0 {
+        out.clip_position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.uv = vec2<f32>(2.0, 2.0);
+        return out;
+    }
+    let world_pos = vec4<f32>(p, 1.0);
     let view_pos = ubo.view * world_pos;
     out.view_space = view_pos.xyz;
     let uv_coords = array<vec2<f32>, 4>(

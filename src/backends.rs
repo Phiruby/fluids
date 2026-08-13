@@ -1,4 +1,4 @@
-use crate::physics::{MpmWorld, RigidBody, SphWorld};
+use crate::physics::{InflowSource, MpmWorld, RigidBody, SphWorld};
 use crate::{FLUID_RENDER_MODE, FluidRenderMode, MPM_MATERIAL, MpmMaterial, State};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -16,6 +16,7 @@ pub trait SimulationBackend {
         Vec<crate::physics::MpmFluidParticle>,
         Vec<crate::physics::MpmElasticParticle>,
         Vec<RigidBody>,
+        Vec<InflowSource>,
     );
 
     fn simulate(state: &mut State<Self>, encoder: &mut wgpu::CommandEncoder)
@@ -44,12 +45,14 @@ impl SimulationBackend for Mpm {
         Vec<crate::physics::MpmFluidParticle>,
         Vec<crate::physics::MpmElasticParticle>,
         Vec<RigidBody>,
+        Vec<InflowSource>,
     ) {
         (
             Vec::new(),
             world.fluid_particles,
             world.elastic_particles,
             world.rigid_bodies,
+            world.inflow_sources,
         )
     }
 
@@ -63,6 +66,7 @@ impl SimulationBackend for Mpm {
             {
                 let mut pass = state.mpm_screen_space.begin_opaque_pass(encoder);
                 state.rigid_pipeline.draw(
+                    &state.device,
                     &mut pass,
                     &state.camera_bind_group,
                     state.mpm_fluid_sim.rigid_buffer(),
@@ -152,6 +156,7 @@ impl SimulationBackend for Mpm {
             );
             if FLUID_RENDER_MODE != FluidRenderMode::ScreenSpaceFluidRendering {
                 state.rigid_pipeline.draw(
+                    &state.device,
                     &mut render_pass,
                     &state.camera_bind_group,
                     state.mpm_fluid_sim.rigid_buffer(),
@@ -172,8 +177,15 @@ impl SimulationBackend for Sph {
         Vec<crate::physics::MpmFluidParticle>,
         Vec<crate::physics::MpmElasticParticle>,
         Vec<RigidBody>,
+        Vec<InflowSource>,
     ) {
-        (world.fluid_particles, Vec::new(), Vec::new(), Vec::new())
+        (
+            world.fluid_particles,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     fn simulate(state: &mut State<Sph>, encoder: &mut wgpu::CommandEncoder) {

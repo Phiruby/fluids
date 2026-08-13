@@ -31,7 +31,7 @@ use winit::{
 };
 
 pub use crate::backends::{Mpm, SimBackend, Sph};
-pub use crate::physics::{FluidCube, MpmObject, RigidBox, SphObject};
+pub use crate::physics::{FluidCube, MpmObject, RigidBox, RigidPipe, SphObject};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FluidRenderMode {
@@ -58,11 +58,12 @@ const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
 
-const MPM_BLOCK_N: usize = 16;
-const MPM_SPACING: f32 = 0.01;
-const MPM_ORIGIN: [f32; 3] = [0.24, 0.18, 0.24];
 const MPM_BOX_CENTER: [f32; 3] = [0.32, 0.09, 0.32];
 const MPM_BOX_HALF: [f32; 3] = [0.12, 0.05, 0.12];
+const MPM_PIPE_CENTER: [f32; 3] = [0.32, 0.42, 0.32];
+const MPM_PIPE_OUTER: f32 = 0.045;
+const MPM_PIPE_INNER: f32 = 0.028;
+const MPM_PIPE_HEIGHT: f32 = 0.16;
 const MPM_PARTICLE_RADIUS: f32 = 0.01;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
@@ -310,8 +311,13 @@ impl<T: SimulationBackend> State<T> {
         let mpm_collider_wireframe =
             WireframeBox::new(&device, col_min, col_max, [0.35, 0.85, 1.0]);
 
-        let (mut fluid_particles, mpm_particles, mpm_elastic_particles, rigid_bodies) =
-            T::into_particles(world);
+        let (
+            mut fluid_particles,
+            mpm_particles,
+            mpm_elastic_particles,
+            rigid_bodies,
+            inflow_sources,
+        ) = T::into_particles(world);
         let n_fluid = fluid_particles.len() as u32;
         if n_fluid > 0 {
             let container = ContainerBoundary {
@@ -346,6 +352,7 @@ impl<T: SimulationBackend> State<T> {
             &mpm_particles,
             &mpm_elastic_particles,
             &rigid_bodies,
+            &inflow_sources,
         );
         let fluid_pipeline = RenderPipeline::new(
             &device,
@@ -722,7 +729,16 @@ impl<T: SimulationBackend + 'static> ApplicationHandler<State<T>> for App<T> {
 pub fn run() -> anyhow::Result<()> {
     let mut scene = Scene::<Mpm>::new();
     scene.add(RigidBox::new(MPM_BOX_CENTER, MPM_BOX_HALF));
-    scene.add(FluidCube::new(MPM_BLOCK_N, MPM_SPACING, MPM_ORIGIN));
+    scene.add(
+        RigidPipe::new(
+            MPM_PIPE_CENTER,
+            MPM_PIPE_OUTER,
+            MPM_PIPE_INNER,
+            MPM_PIPE_HEIGHT,
+        )
+        .pinned()
+        .with_flow([0.0, -20.0, 0.0]),
+    );
     scene.run()
 }
 

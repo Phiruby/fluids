@@ -8,6 +8,8 @@ struct ColliderUniform {
 @group(0) @binding(0) var<storage, read_write> rigid_bodies: array<RigidBody>;
 @group(0) @binding(1) var<uniform> collider: ColliderUniform;
 
+#include <../objects/sdf_eval.wgsl>
+
 fn quat_to_mat3(q: vec4<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(
         quat_rotate(q, vec3<f32>(1.0, 0.0, 0.0)),
@@ -38,7 +40,20 @@ fn apply_inv_inertia(q: vec4<f32>, inv_i: vec3<f32>, torque: vec3<f32>) -> vec3<
 fn update_rigid_bodies(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if i >= arrayLength(&rigid_bodies) { return; }
+    if rigid_bodies[i].operand != 0u { return; }
     if rigid_bodies[i].mass <= 1e-8 { return; }
+
+    if rigid_bodies[i].pinned != 0u {
+        rigid_bodies[i].v_cm = vec3<f32>(0.0);
+        rigid_bodies[i].omega = vec3<f32>(0.0);
+        atomicStore(&rigid_bodies[i].force_x, bitcast<u32>(0.0));
+        atomicStore(&rigid_bodies[i].force_y, bitcast<u32>(0.0));
+        atomicStore(&rigid_bodies[i].force_z, bitcast<u32>(0.0));
+        atomicStore(&rigid_bodies[i].torque_x, bitcast<u32>(0.0));
+        atomicStore(&rigid_bodies[i].torque_y, bitcast<u32>(0.0));
+        atomicStore(&rigid_bodies[i].torque_z, bitcast<u32>(0.0));
+        return;
+    }
 
     var pos = rigid_bodies[i].position;
     var q = rigid_bodies[i].orientation;
@@ -47,7 +62,7 @@ fn update_rigid_bodies(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mass = rigid_bodies[i].mass;
     let inv_mass = rigid_bodies[i].inv_mass;
     let inv_i = rigid_bodies[i].inv_inertia;
-    let h = rigid_bodies[i].params.xyz;
+    let h = body_extent(i);
 
     var f = vec3<f32>(
         bitcast<f32>(atomicLoad(&rigid_bodies[i].force_x)),

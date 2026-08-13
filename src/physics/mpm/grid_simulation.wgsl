@@ -23,6 +23,8 @@ const N: u32 = 32u;
 @group(0) @binding(1) var<uniform> collider: ColliderUniform;
 @group(0) @binding(2) var<storage, read_write> rigid_bodies: array<RigidBody>;
 
+#include <../objects/sdf_eval.wgsl>
+
 fn get_grid_coord(idx: u32) -> vec3<u32> {
     let z = idx % N;
     let y = (idx / N) % N;
@@ -115,19 +117,9 @@ fn collide_rigids(pos: vec3<f32>, v: vec3<f32>, mass: f32) -> vec3<f32> {
     var v_out = v;
     let n = arrayLength(&rigid_bodies);
     for (var i = 0u; i < n; i++) {
-        var s: RigidState;
-        s.object_type = rigid_bodies[i].object_type;
-        s.invert = rigid_bodies[i].invert;
-        s.position = rigid_bodies[i].position;
-        s.scale = rigid_bodies[i].scale;
-        s.orientation = rigid_bodies[i].orientation;
-        s.params = rigid_bodies[i].params;
-        s.v_cm = rigid_bodies[i].v_cm;
-        s.mass = rigid_bodies[i].mass;
-        s.omega = rigid_bodies[i].omega;
-        let hit = collide_rigid(s, pos, v_out, mass);
+        let hit = collide_rigid(i, pos, v_out, mass);
         if any(hit.force != vec3<f32>(0.0)) {
-            atomic_add_rb(i, hit.force, cross(pos - s.position, hit.force));
+            atomic_add_rb(i, hit.force, cross(pos - rigid_bodies[i].position, hit.force));
         }
         v_out = hit.v;
     }

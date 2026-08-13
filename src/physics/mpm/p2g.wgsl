@@ -200,6 +200,8 @@ fn particles_to_grid(@builtin(global_invocation_id) id: vec3<u32>) {
     let p_idx = id.x;
     if p_idx >= arrayLength(&particles) { return; }
     let p = particles[p_idx];
+    // for out-of-scene particles (e.g fluid particles waiting to be pumped in)
+    if p.position.x > 50.0 { return; }
     scatter_mass_momentum(p.position, p.velocity, p.B, p.mass);
 }
 
@@ -246,6 +248,7 @@ fn fluid_particles_to_grid_stress(@builtin(global_invocation_id) id: vec3<u32>) 
     if p_idx >= arrayLength(&particles) { return; }
 
     let p = particles[p_idx];
+    if p.position.x > 50.0 { return; }
     let relative = (p.position - BOTTOM_LEFT) / DX;
     let base_coord = vec3<i32>(floor(relative - 0.5));
 

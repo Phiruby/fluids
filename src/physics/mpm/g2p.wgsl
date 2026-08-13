@@ -144,6 +144,7 @@ fn fluid_grid_to_particles(@builtin(global_invocation_id) id: vec3<u32>) {
     let p_idx = id.x;
     if p_idx >= arrayLength(&particles) { return; }
     var p = particles[p_idx];
+    if p.position.x > 50.0 { return; }
 
     let updates = get_updates(p.position);
     p.velocity = updates.new_v;
