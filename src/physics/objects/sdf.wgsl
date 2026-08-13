@@ -1,5 +1,5 @@
 const DT = 0.0001;
-const MU = 0.4;
+const MU = 0.01;
 const SDF_SPHERE = 0u;
 const SDF_CYLINDER = 1u;
 const SDF_BOX = 2u;
@@ -117,7 +117,8 @@ fn collide_rigid(rb: RigidState, pos: vec3<f32>, v: vec3<f32>, node_mass: f32) -
     if rb.mass <= 1e-8 {
         return result;
     }
-    if rigid_sdf(rb, pos) > 0.0 {
+    // roughly size of one grid cell (const DX)
+    if rigid_sdf(rb, pos) > 0.02 {
         return result;
     }
     let n = rigid_sdf_normal(rb, pos);

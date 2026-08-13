@@ -69,10 +69,20 @@ fn frag_main(input: VertexOutput) -> FragmentOutput {
     return out;
 }
 
+struct ThicknessOutput {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) frag_depth: f32,
+}
+
 @fragment
-fn frag_thickness(input: VertexOutput) -> @location(0) vec4<f32> {
+fn frag_thickness(input: VertexOutput) -> ThicknessOutput {
     let r = dot(input.uv, input.uv);
     if r > 1.0 { discard; }
-    let thickness = 2.0 * sqrt(1.0 - r) * ubo.particle_radius;
-    return vec4<f32>(thickness, 0.0, 0.0, 1.0);
+    let normal_view = vec3<f32>(input.uv, sqrt(1.0 - r));
+    let view_pos = input.view_space + normal_view * ubo.particle_radius;
+    let proj_pos = ubo.projection * vec4<f32>(view_pos, 1.0);
+    var out: ThicknessOutput;
+    out.color = vec4<f32>(2.0 * normal_view.z * ubo.particle_radius, 0.0, 0.0, 1.0);
+    out.frag_depth = proj_pos.z / proj_pos.w;
+    return out;
 }

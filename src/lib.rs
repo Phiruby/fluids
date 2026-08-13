@@ -48,7 +48,7 @@ pub enum MpmMaterial {
 
 const SIM_BACKEND: SimBackend = SimBackend::Mpm;
 // marching cubes slow and bad :(
-const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::Particles;
+const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRendering;
 const MPM_MATERIAL: MpmMaterial = MpmMaterial::Fluid;
 
 const FLUID_SPACING: f32 = 0.03;

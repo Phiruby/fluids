@@ -60,6 +60,15 @@ impl SimulationBackend for Mpm {
         if FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering
             && MPM_MATERIAL == MpmMaterial::Fluid
         {
+            {
+                let mut pass = state.mpm_screen_space.begin_opaque_pass(encoder);
+                state.rigid_pipeline.draw(
+                    &mut pass,
+                    &state.camera_bind_group,
+                    state.mpm_fluid_sim.rigid_buffer(),
+                    state.mpm_fluid_sim.num_rigid_bodies(),
+                );
+            }
             state.mpm_screen_space.prepare(
                 &state.device,
                 state.mpm_fluid_sim.particle_buffer(),
@@ -141,12 +150,14 @@ impl SimulationBackend for Mpm {
                 &state.camera_bind_group,
                 &state.mpm_collider_wireframe,
             );
-            state.rigid_pipeline.draw(
-                &mut render_pass,
-                &state.camera_bind_group,
-                state.mpm_fluid_sim.rigid_buffer(),
-                state.mpm_fluid_sim.num_rigid_bodies(),
-            );
+            if FLUID_RENDER_MODE != FluidRenderMode::ScreenSpaceFluidRendering {
+                state.rigid_pipeline.draw(
+                    &mut render_pass,
+                    &state.camera_bind_group,
+                    state.mpm_fluid_sim.rigid_buffer(),
+                    state.mpm_fluid_sim.num_rigid_bodies(),
+                );
+            }
         }
     }
 }
@@ -179,7 +190,9 @@ impl SimulationBackend for Sph {
         }
 
         if FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering {
-            // perform compaction (filter out boundary particles) b4 creating render pass
+            {
+                let _opaque = state.sph_screen_space.begin_opaque_pass(encoder);
+            }
             state.sph_screen_space.prepare(
                 &state.device,
                 state.fluid_sim.particle_buffer(),
