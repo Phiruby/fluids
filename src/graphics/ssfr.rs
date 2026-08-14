@@ -5,7 +5,8 @@ use std::marker::PhantomData;
 use wgpu::util::DeviceExt;
 
 fn ssfr_particle_shader<P: GpuParticle>(device: &wgpu::Device) -> wgpu::ShaderModule {
-    let src = include_str!("fluid_depth.wgsl").replace("${PARTICLE_FIELDS}", P::wgsl_fields());
+    let src = include_str!("shaders/ssfr/fluid_depth.wgsl")
+        .replace("${PARTICLE_FIELDS}", P::wgsl_fields());
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("ssfr particle depth/thickness"),
         source: wgpu::ShaderSource::Wgsl(Cow::Owned(src)),
@@ -27,7 +28,8 @@ struct FluidCompaction {
 
 impl FluidCompaction {
     pub fn new(device: &wgpu::Device, nparticles: u32) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("fluid_compaction.wgsl"));
+        let module =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/ssfr/fluid_compaction.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fluid compaction"),
             entries: &[
@@ -211,8 +213,6 @@ struct FluidDepth {
     layout: wgpu::BindGroupLayout,
     /// positive eye-space depth (i.e depth from view space). used by curvature flow
     pub eye_depth_texture: Texture,
-    /// used for hardware depth testing
-    depth_texture: Texture,
 }
 
 impl FluidDepth {
@@ -304,13 +304,10 @@ impl FluidDepth {
                 view_formats: &[],
             },
         );
-        let depth_texture =
-            Texture::create_depth_texture(device, extend_width, extend_height, "fluid depth ssfr");
         Self {
             pipeline: fluid_depth_pipeline,
             layout,
             eye_depth_texture,
-            depth_texture,
         }
     }
 
@@ -321,6 +318,7 @@ impl FluidDepth {
         fluid_particles: &wgpu::Buffer,
         nparticles: u32,
         uniforms: &wgpu::BindGroup,
+        opaque_depth: &wgpu::TextureView,
     ) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Fluid depth calculation render pass"),
@@ -340,9 +338,9 @@ impl FluidDepth {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_texture.view,
+                view: opaque_depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -436,7 +434,13 @@ impl FluidThickness {
                     unclipped_depth: false,
                     conservative: false,
                 },
-                depth_stencil: None,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Texture::DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
                 multisample: wgpu::MultisampleState {
                     count: 1,
                     mask: !0,
@@ -480,6 +484,7 @@ impl FluidThickness {
         fluid_particles: &wgpu::Buffer,
         nparticles: u32,
         uniforms: &wgpu::BindGroup,
+        opaque_depth: &wgpu::TextureView,
     ) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Render pass"),
@@ -497,7 +502,14 @@ impl FluidThickness {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: opaque_depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             occlusion_query_set: None,
             timestamp_writes: None,
             multiview_mask: None,
@@ -550,7 +562,8 @@ impl CurvatureFlow {
         focal_x: f32,
         focal_y: f32,
     ) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("curvature_flow.wgsl"));
+        let module =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/ssfr/curvature_flow.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("curvature flow"),
             entries: &[
@@ -809,7 +822,8 @@ impl DepthViz {
         surface_format: wgpu::TextureFormat,
         uniform_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("visualize_depth.wgsl"));
+        let module =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/ssfr/visualize_depth.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("depth viz"),
             entries: &[
@@ -838,6 +852,16 @@ impl DepthViz {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -890,6 +914,7 @@ impl DepthViz {
         normal_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         thickness_view: &wgpu::TextureView,
+        background_view: &wgpu::TextureView,
         render_pass: &mut wgpu::RenderPass,
         uniforms: &wgpu::BindGroup,
     ) {
@@ -909,6 +934,10 @@ impl DepthViz {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(depth_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(background_view),
+                },
             ],
         });
         render_pass.set_pipeline(&self.pipeline);
@@ -926,6 +955,9 @@ pub struct ScreenSpaceRendering<P: GpuParticle> {
     thickness: FluidThickness,
     smoothing: CurvatureFlow,
     depth_viz: DepthViz,
+    /// for scene before fluid is rendered (i.e just rigid bodies and elastic bodies)
+    opaque_color: Texture,
+    opaque_depth: Texture,
     n_draw: u32,
     _marker: PhantomData<P>,
 }
@@ -947,6 +979,26 @@ impl<P: GpuParticle> ScreenSpaceRendering<P> {
         } else {
             None
         };
+        let opaque_color = Texture::from_descriptor(
+            device,
+            &wgpu::TextureDescriptor {
+                label: Some("ssfr opaque color"),
+                size: wgpu::Extent3d {
+                    width: extent_width.max(1),
+                    height: extent_height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: surface_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+        let opaque_depth =
+            Texture::create_depth_texture(device, extent_width, extent_height, "ssfr opaque depth");
         Self {
             compaction,
             depth: FluidDepth::new::<P>(
@@ -963,9 +1015,42 @@ impl<P: GpuParticle> ScreenSpaceRendering<P> {
                 extent_height,
             ),
             smoothing: CurvatureFlow::new(device, extent_width, extent_height, focal_x, focal_y),
+            opaque_color,
+            opaque_depth,
             n_draw,
             _marker: PhantomData,
         }
+    }
+
+    /// clear and return a pass targeting the opaque scene;
+    /// call before prepare() so thickness/depth can test against it
+    pub fn begin_opaque_pass<'a>(
+        &'a self,
+        encoder: &'a mut wgpu::CommandEncoder,
+    ) -> wgpu::RenderPass<'a> {
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ssfr opaque scene"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.opaque_color.view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(crate::graphics::SCENE_CLEAR),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.opaque_depth.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
     }
 
     /// create depth / thickness maps. optionally, if needed, performs compaction first
@@ -977,18 +1062,31 @@ impl<P: GpuParticle> ScreenSpaceRendering<P> {
         uniforms: &wgpu::BindGroup,
     ) {
         let draw_count = self.n_draw;
+        let opaque_depth = &self.opaque_depth.view;
         if let Some(compaction) = &self.compaction {
             compaction.compact(device, particles, encoder);
             let compact = compaction.get_compact_fluids_buffer();
             self.thickness
-                .draw(device, encoder, compact, draw_count, uniforms);
+                .draw(device, encoder, compact, draw_count, uniforms, opaque_depth);
             self.depth
-                .draw(device, encoder, compact, draw_count, uniforms);
+                .draw(device, encoder, compact, draw_count, uniforms, opaque_depth);
         } else {
-            self.thickness
-                .draw(device, encoder, particles, draw_count, uniforms);
-            self.depth
-                .draw(device, encoder, particles, draw_count, uniforms);
+            self.thickness.draw(
+                device,
+                encoder,
+                particles,
+                draw_count,
+                uniforms,
+                opaque_depth,
+            );
+            self.depth.draw(
+                device,
+                encoder,
+                particles,
+                draw_count,
+                uniforms,
+                opaque_depth,
+            );
         }
         self.smoothing
             .smooth(device, &self.depth.eye_depth_texture, encoder);
@@ -1005,6 +1103,7 @@ impl<P: GpuParticle> ScreenSpaceRendering<P> {
             self.smoothing.normal_map(),
             self.smoothing.smoothed_depth_view(),
             &self.thickness.thickness_texture().view,
+            &self.opaque_color.view,
             render_pass,
             uniforms,
         );

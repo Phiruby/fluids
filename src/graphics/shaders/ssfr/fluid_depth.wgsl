@@ -34,7 +34,14 @@ struct FragmentOutput {
 @vertex
 fn vertex_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let world_pos = vec4<f32>(particles[input.instance_idx].position, 1.0);
+    let p = particles[input.instance_idx].position;
+    // out-of-scene particles (e.g fluid particles waiting to be pumped in) are not drawn
+    if p.x > 50.0 {
+        out.clip_position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.uv = vec2<f32>(2.0, 2.0);
+        return out;
+    }
+    let world_pos = vec4<f32>(p, 1.0);
     let view_pos = ubo.view * world_pos;
     out.view_space = view_pos.xyz;
     let uv_coords = array<vec2<f32>, 4>(
@@ -69,10 +76,20 @@ fn frag_main(input: VertexOutput) -> FragmentOutput {
     return out;
 }
 
+struct ThicknessOutput {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) frag_depth: f32,
+}
+
 @fragment
-fn frag_thickness(input: VertexOutput) -> @location(0) vec4<f32> {
+fn frag_thickness(input: VertexOutput) -> ThicknessOutput {
     let r = dot(input.uv, input.uv);
     if r > 1.0 { discard; }
-    let thickness = 2.0 * sqrt(1.0 - r) * ubo.particle_radius;
-    return vec4<f32>(thickness, 0.0, 0.0, 1.0);
+    let normal_view = vec3<f32>(input.uv, sqrt(1.0 - r));
+    let view_pos = input.view_space + normal_view * ubo.particle_radius;
+    let proj_pos = ubo.projection * vec4<f32>(view_pos, 1.0);
+    var out: ThicknessOutput;
+    out.color = vec4<f32>(2.0 * normal_view.z * ubo.particle_radius, 0.0, 0.0, 1.0);
+    out.frag_depth = proj_pos.z / proj_pos.w;
+    return out;
 }

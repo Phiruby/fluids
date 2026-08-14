@@ -1,5 +1,6 @@
 use crate::graphics::{PipelineInfo, PipelineState, create_pipeline};
 use crate::physics::RenderParticle;
+use crate::texture::Texture;
 use std::marker::PhantomData;
 use wgpu::util::DeviceExt;
 
@@ -101,7 +102,7 @@ fn particle_cube(radius: f32) -> ([ParticleMeshVertex; 8], [u16; 36]) {
     (vertices, indices)
 }
 
-/// draw particles as instanced cubes; 
+/// draw particles as instanced cubes;
 //  generic P provide instance layout + WGSL vertex fields (works for generic structs)
 pub struct RenderPipeline<P: RenderParticle> {
     pipeline: PipelineState,
@@ -118,7 +119,7 @@ impl<P: RenderParticle> RenderPipeline<P> {
         surface_format: wgpu::TextureFormat,
         particle_radius: f32,
     ) -> Self {
-        let shader_src = include_str!("particle_render.wgsl")
+        let shader_src = include_str!("shaders/particle_render.wgsl")
             .replace("${INSTANCE_FIELDS}", P::instance_wgsl_fields())
             .replace("${VS_MAIN_BODY}", P::vs_main_body());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -329,5 +330,186 @@ impl WireframeBoxPipeline {
         self.pipeline.bind(render_pass, global_bind_group);
         render_pass.set_vertex_buffer(0, wireframe.vertex_buffer.slice(..));
         render_pass.draw(0..wireframe.num_vertices, 0..1);
+    }
+}
+
+/// uses analytical sdf (see sdf.rs) and uses ray marching to render the object
+pub struct RigidBodyPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bodies_layout: wgpu::BindGroupLayout,
+    mesh_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
+}
+
+impl RigidBodyPipeline {
+    pub fn new(
+        device: &wgpu::Device,
+        global_bind_group_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/rigid_render.wgsl"));
+        let bodies_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rigid bodies"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rigid render"),
+            bind_group_layouts: &[Some(global_bind_group_layout), Some(&bodies_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rigid render"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[ParticleMeshVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let (mesh, indices) = particle_cube(1.0);
+        let mesh_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Rigid mesh"),
+            contents: bytemuck::cast_slice(&mesh),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Rigid index"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Self {
+            pipeline,
+            bodies_layout,
+            mesh_buffer,
+            index_buffer,
+            num_indices: indices.len() as u32,
+        }
+    }
+
+    pub fn draw(
+        &self,
+        device: &wgpu::Device,
+        render_pass: &mut wgpu::RenderPass,
+        global_bind_group: &wgpu::BindGroup,
+        rigid_buffer: &wgpu::Buffer,
+        num_instances: u32,
+    ) {
+        if num_instances == 0 {
+            return;
+        }
+        let bodies = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rigid bodies"),
+            layout: &self.bodies_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: rigid_buffer.as_entire_binding(),
+            }],
+        });
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, global_bind_group, &[]);
+        render_pass.set_bind_group(1, &bodies, &[]);
+        render_pass.set_vertex_buffer(0, self.mesh_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.draw_indexed(0..self.num_indices, 0, 0..num_instances);
+    }
+}
+
+pub struct SkyPipeline {
+    pipeline: wgpu::RenderPipeline,
+}
+
+impl SkyPipeline {
+    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/sky.wgsl"));
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { pipeline }
+    }
+
+    pub fn draw(&self, render_pass: &mut wgpu::RenderPass) {
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.draw(0..3, 0..1);
     }
 }

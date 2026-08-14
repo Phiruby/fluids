@@ -1,21 +1,23 @@
+mod backends;
 mod camera;
+mod environments;
 mod graphics;
 mod physics;
 mod texture;
+use crate::backends::SimulationBackend;
+use crate::backends::{MpmSceneEvent, MpmTimeline};
 use crate::camera::CameraController;
 use crate::graphics::{
-    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, ScreenSpaceRendering, WireframeBox,
-    WireframeBoxPipeline,
+    MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, RigidBodyPipeline,
+    ScreenSpaceRendering, SkyPipeline, WireframeBox, WireframeBoxPipeline,
 };
 use crate::physics::{
     ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmElasticParticle, MpmFluidParticle,
-    MpmFluidSim, assign_rest_densities, fluid_cube, mpm_collider_bounds, mpm_elastic_block,
-    mpm_fluid_block, mpm_grid_bounds,
+    MpmFluidSim, assign_rest_densities, mpm_collider_bounds, mpm_frame_dt, mpm_grid_bounds,
 };
 use crate::texture::Texture;
 use bytemuck;
 use cgmath::SquareMatrix;
-use nalgebra::Vector3;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -30,21 +32,19 @@ use winit::{
     window::Window,
 };
 
+pub use crate::backends::{Mpm, SimBackend, Sph};
+pub use crate::environments::{MpmEnvironment, MultiBoxWaterCube, PumpAtCube};
+pub use crate::physics::{FluidCube, MPM_DX, MPM_N, MpmObject, RigidBox, RigidPipe, SphObject};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FluidRenderMode {
+pub enum FluidRenderMode {
     Particles,
     MarchingCubes,
     ScreenSpaceFluidRendering,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SimBackend {
-    Sph,
-    Mpm,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MpmMaterial {
+pub enum MpmMaterial {
     Fluid,
     Elastic,
 }
@@ -54,21 +54,14 @@ const SIM_BACKEND: SimBackend = SimBackend::Mpm;
 const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRendering;
 const MPM_MATERIAL: MpmMaterial = MpmMaterial::Fluid;
 
-const FLUID_GRID_N: usize = 30;
 const FLUID_SPACING: f32 = 0.03;
-const FLUID_PARTICLE_RADIUS: f32 = 0.020;
-const FLUID_ORIGIN: [f32; 3] = [-0.95, 0.50, -0.7];
+const FLUID_PARTICLE_RADIUS: f32 = 0.30;
 const FLUID_CELL_SIZE: f32 = 0.1;
 const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
 const ISO_LEVEL_STEP: f32 = 100.0;
 
-const MPM_BLOCK_N: usize = 32;
-const MPM_SPACING: f32 = 0.01;
-const MPM_ORIGIN: [f32; 3] = [0.16, 0.28, 0.16];
-const MPM_ELASTIC_BLOCK_N: usize = 16;
-const MPM_ELASTIC_ORIGIN: [f32; 3] = [0.16, 0.28, 0.16];
-const MPM_PARTICLE_RADIUS: f32 = 0.01;
+const MPM_PARTICLE_RADIUS: f32 = 0.02;
 
 const CONTAINER_MIN: [f32; 3] = [-1.20, 0.05, -1.0];
 const CONTAINER_MAX: [f32; 3] = [0.1, 1.85, 0.8];
@@ -90,6 +83,7 @@ pub(crate) struct Camera {
     znear: f32,
     zfar: f32,
 }
+
 impl Camera {
     fn build_view_projection_matrix(&self) -> (cgmath::Matrix4<f32>, cgmath::Matrix4<f32>) {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
@@ -104,7 +98,8 @@ impl Camera {
         (focal_x, focal_y)
     }
 }
-pub struct State {
+
+pub struct State<T: SimulationBackend> {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -118,6 +113,8 @@ pub struct State {
     fluid_pipeline: RenderPipeline<FluidParticle>,
     mpm_pipeline: RenderPipeline<MpmFluidParticle>,
     mpm_elastic_pipeline: RenderPipeline<MpmElasticParticle>,
+    rigid_pipeline: RigidBodyPipeline,
+    sky_pipeline: SkyPipeline,
     marching_cubes: MarchingCubes,
     sph_screen_space: ScreenSpaceRendering<FluidParticle>,
     mpm_screen_space: ScreenSpaceRendering<MpmFluidParticle>,
@@ -132,6 +129,8 @@ pub struct State {
     depth_texture: Texture,
     fluid_sim: FluidSim,
     mpm_fluid_sim: MpmFluidSim,
+    timeline: MpmTimeline,
+    _backend: std::marker::PhantomData<T>,
 }
 
 #[repr(C)]
@@ -145,6 +144,7 @@ struct CameraUniform {
     screen_height: f32,
     _pad: [f32; 3],
 }
+
 impl CameraUniform {
     fn new() -> Self {
         Self {
@@ -166,8 +166,13 @@ impl CameraUniform {
         self.camera_pos = camera.eye.into();
     }
 }
-impl State {
-    pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+
+impl<T: SimulationBackend> State<T> {
+    pub async fn new(
+        window: Arc<Window>,
+        world: T::World,
+        timeline: MpmTimeline,
+    ) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             #[cfg(not(target_arch = "wasm32"))]
@@ -234,13 +239,14 @@ impl State {
             0.5 * (mpm_min[1] + mpm_max[1]),
             0.5 * (mpm_min[2] + mpm_max[2]),
         ];
+        let span = mpm_max[0] - mpm_min[0];
 
         let camera = if SIM_BACKEND == SimBackend::Mpm {
             Camera {
                 eye: (
-                    mpm_center[0] + 1.4,
-                    mpm_center[1] + 1.0,
-                    mpm_center[2] + 1.8,
+                    mpm_center[0] + span * 2.2,
+                    mpm_center[1] + span * 1.5,
+                    mpm_center[2] + span * 2.8,
                 )
                     .into(),
                 target: (mpm_center[0], mpm_center[1], mpm_center[2]).into(),
@@ -309,54 +315,49 @@ impl State {
         let mpm_collider_wireframe =
             WireframeBox::new(&device, col_min, col_max, [0.35, 0.85, 1.0]);
 
-        let mut fluid_particles =
-            fluid_cube(FLUID_GRID_N, FLUID_SPACING, Vector3::from(FLUID_ORIGIN));
+        let (
+            mut fluid_particles,
+            mpm_particles,
+            mpm_elastic_particles,
+            rigid_bodies,
+            inflow_sources,
+        ) = T::into_particles(world);
         let n_fluid = fluid_particles.len() as u32;
-        let container = ContainerBoundary {
-            top_left: nalgebra::Point3::new(CONTAINER_MIN[0], CONTAINER_MIN[1], CONTAINER_MIN[2]),
-            bottom_right: nalgebra::Point3::new(
-                CONTAINER_MAX[0],
-                CONTAINER_MAX[1],
-                CONTAINER_MAX[2],
-            ),
-            nlayers: FLUID_CONTAINER_LAYERS,
-            spacing: FLUID_SPACING / 2.0,
-        };
-        let mut boundary_points = container.create_points(FLUID_CONTAINER_LAYERS);
-        assign_rest_densities(
-            &mut fluid_particles,
-            &mut boundary_points,
-            FLUID_SPACING,
-            &CubicKernel::new(FLUID_CELL_SIZE),
-        );
-        fluid_particles.append(&mut boundary_points);
-        let padded_len = fluid_particles.len().next_multiple_of(FLUID_WORKGROUP);
-        fluid_particles.resize(padded_len, FluidParticle::inert());
+        if n_fluid > 0 {
+            let container = ContainerBoundary {
+                top_left: nalgebra::Point3::new(
+                    CONTAINER_MIN[0],
+                    CONTAINER_MIN[1],
+                    CONTAINER_MIN[2],
+                ),
+                bottom_right: nalgebra::Point3::new(
+                    CONTAINER_MAX[0],
+                    CONTAINER_MAX[1],
+                    CONTAINER_MAX[2],
+                ),
+                nlayers: FLUID_CONTAINER_LAYERS,
+                spacing: FLUID_SPACING / 2.0,
+            };
+            let mut boundary_points = container.create_points(FLUID_CONTAINER_LAYERS);
+            assign_rest_densities(
+                &mut fluid_particles,
+                &mut boundary_points,
+                FLUID_SPACING,
+                &CubicKernel::new(FLUID_CELL_SIZE),
+            );
+            fluid_particles.append(&mut boundary_points);
+            let padded_len = fluid_particles.len().next_multiple_of(FLUID_WORKGROUP);
+            fluid_particles.resize(padded_len, FluidParticle::inert());
+        }
 
         let fluid_sim = FluidSim::new(&device, &fluid_particles);
-        let (mpm_particles, mpm_elastic_particles) = match MPM_MATERIAL {
-            MpmMaterial::Fluid => (
-                mpm_fluid_block(
-                    MPM_BLOCK_N,
-                    MPM_BLOCK_N,
-                    MPM_BLOCK_N,
-                    MPM_SPACING,
-                    Vector3::from(MPM_ORIGIN),
-                ),
-                Vec::new(),
-            ),
-            MpmMaterial::Elastic => (
-                Vec::new(),
-                mpm_elastic_block(
-                    MPM_ELASTIC_BLOCK_N,
-                    MPM_ELASTIC_BLOCK_N,
-                    MPM_ELASTIC_BLOCK_N,
-                    MPM_SPACING,
-                    Vector3::from(MPM_ELASTIC_ORIGIN),
-                ),
-            ),
-        };
-        let mpm_fluid_sim = MpmFluidSim::new(&device, &mpm_particles, &mpm_elastic_particles);
+        let mpm_fluid_sim = MpmFluidSim::new(
+            &device,
+            &mpm_particles,
+            &mpm_elastic_particles,
+            &rigid_bodies,
+            &inflow_sources,
+        );
         let fluid_pipeline = RenderPipeline::new(
             &device,
             &camera_bind_group_layout,
@@ -375,6 +376,9 @@ impl State {
             config.format,
             MPM_PARTICLE_RADIUS,
         );
+        let rigid_pipeline =
+            RigidBodyPipeline::new(&device, &camera_bind_group_layout, config.format);
+        let sky_pipeline = SkyPipeline::new(&device, config.format);
         let marching_cubes = MarchingCubes::new(&device);
         let mc_pipeline =
             MarchingCubesRenderPipeline::new(&device, &camera_bind_group_layout, config.format);
@@ -383,23 +387,20 @@ impl State {
         let sph_screen_space = ScreenSpaceRendering::new(
             &device,
             &camera_bind_group_layout,
-            fluid_particles.len() as u32,
-            n_fluid,
+            fluid_particles.len().max(1) as u32,
+            n_fluid.max(1),
             config.format,
             size.width,
             size.height,
             focal_x,
             focal_y,
         );
-        let mpm_particle_count = match MPM_MATERIAL {
-            MpmMaterial::Fluid => mpm_particles.len() as u32,
-            MpmMaterial::Elastic => 0,
-        };
+        let mpm_fluid_particle_count = mpm_particles.len() as u32;
         let mpm_screen_space = ScreenSpaceRendering::new(
             &device,
             &camera_bind_group_layout,
-            mpm_particle_count.max(1),
-            mpm_particle_count,
+            mpm_fluid_particle_count.max(1),
+            mpm_fluid_particle_count.max(1),
             config.format,
             size.width,
             size.height,
@@ -420,6 +421,8 @@ impl State {
             fluid_pipeline,
             mpm_pipeline,
             mpm_elastic_pipeline,
+            rigid_pipeline,
+            sky_pipeline,
             marching_cubes,
             mc_pipeline,
             camera,
@@ -430,8 +433,10 @@ impl State {
             depth_texture,
             fluid_sim,
             mpm_fluid_sim,
+            timeline,
             sph_screen_space,
             mpm_screen_space,
+            _backend: std::marker::PhantomData,
         })
     }
 
@@ -484,162 +489,10 @@ impl State {
                 label: Some("Command encoder for rendering"),
             });
 
-        match SIM_BACKEND {
-            SimBackend::Sph => {
-                self.fluid_sim.step(&self.device, &self.queue, &mut encoder);
-            }
-            SimBackend::Mpm => {
-                self.mpm_fluid_sim.step(&self.device, &mut encoder);
-            }
-        }
-
-        if SIM_BACKEND == SimBackend::Sph && FLUID_RENDER_MODE == FluidRenderMode::MarchingCubes {
-            self.marching_cubes.extract(
-                &self.device,
-                &mut encoder,
-                self.fluid_sim.particle_buffer(),
-                self.fluid_sim.hash_offsets_buffer(),
-            );
-        }
-
-        if SIM_BACKEND == SimBackend::Sph
-            && FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering
-        {
-            // perform compaction (filter out boundary particles) b4 creating render pass
-            self.sph_screen_space.prepare(
-                &self.device,
-                self.fluid_sim.particle_buffer(),
-                &mut encoder,
-                &self.camera_bind_group,
-            );
-        }
-
-        if SIM_BACKEND == SimBackend::Mpm
-            && FLUID_RENDER_MODE == FluidRenderMode::ScreenSpaceFluidRendering
-            && MPM_MATERIAL == MpmMaterial::Fluid
-        {
-            self.mpm_screen_space.prepare(
-                &self.device,
-                self.mpm_fluid_sim.particle_buffer(),
-                &mut encoder,
-                &self.camera_bind_group,
-            );
-        }
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                occlusion_query_set: None,
-                timestamp_writes: None,
-                multiview_mask: None,
-            });
-
-            match SIM_BACKEND {
-                SimBackend::Sph => match FLUID_RENDER_MODE {
-                    FluidRenderMode::Particles => {
-                        self.fluid_pipeline.draw(
-                            &mut render_pass,
-                            &self.camera_bind_group,
-                            self.fluid_sim.particle_buffer(),
-                            self.fluid_sim.num_particles(),
-                        );
-                    }
-                    FluidRenderMode::MarchingCubes => {
-                        self.mc_pipeline.draw(
-                            &mut render_pass,
-                            &self.camera_bind_group,
-                            self.marching_cubes.vertex_buffer(),
-                            self.marching_cubes.index_buffer(),
-                            self.marching_cubes.indirect_buffer(),
-                        );
-                    }
-                    FluidRenderMode::ScreenSpaceFluidRendering => {
-                        self.sph_screen_space.draw(
-                            &self.device,
-                            &mut render_pass,
-                            &self.camera_bind_group,
-                        );
-                    }
-                },
-                SimBackend::Mpm => match FLUID_RENDER_MODE {
-                    FluidRenderMode::Particles => match MPM_MATERIAL {
-                        MpmMaterial::Fluid => {
-                            self.mpm_pipeline.draw(
-                                &mut render_pass,
-                                &self.camera_bind_group,
-                                self.mpm_fluid_sim.particle_buffer(),
-                                self.mpm_fluid_sim.num_particles(),
-                            );
-                        }
-                        MpmMaterial::Elastic => {
-                            self.mpm_elastic_pipeline.draw(
-                                &mut render_pass,
-                                &self.camera_bind_group,
-                                self.mpm_fluid_sim.elastic_particle_buffer(),
-                                self.mpm_fluid_sim.num_elastic_particles(),
-                            );
-                        }
-                    },
-                    FluidRenderMode::ScreenSpaceFluidRendering => {
-                        assert!(
-                            MPM_MATERIAL == MpmMaterial::Fluid,
-                            "SSFR is only for MPM fluid particles"
-                        );
-                        self.mpm_screen_space.draw(
-                            &self.device,
-                            &mut render_pass,
-                            &self.camera_bind_group,
-                        );
-                    }
-                    _ => panic!("Mpm does not support this render mode"),
-                },
-            }
-
-            match SIM_BACKEND {
-                SimBackend::Sph => {
-                    self.wireframe_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        &self.sph_wireframe,
-                    );
-                }
-                SimBackend::Mpm => {
-                    self.wireframe_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        &self.mpm_wireframe,
-                    );
-                    self.wireframe_pipeline.draw(
-                        &mut render_pass,
-                        &self.camera_bind_group,
-                        &self.mpm_collider_wireframe,
-                    );
-                }
-            }
-        }
-
+        self.timeline
+            .tick(mpm_frame_dt(), &self.queue, &self.mpm_fluid_sim);
+        T::simulate(self, &mut encoder);
+        T::draw(self, &mut encoder, &view);
         self.queue.submit([encoder.finish()]);
         output.present();
         Ok(())
@@ -690,7 +543,6 @@ impl State {
             .process_cursor_moved(position, &mut self.camera);
     }
 
-
     fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_projection(&self.camera);
@@ -702,17 +554,86 @@ impl State {
     }
 }
 
-pub struct App {
-    #[cfg(target_arch = "wasm32")]
-    proxy: Option<winit::event_loop::EventLoopProxy<State>>,
-    state: Option<State>,
+pub struct Scene<T: SimulationBackend> {
+    world: T::World,
+    pub(crate) events: Vec<MpmSceneEvent>,
 }
 
-impl App {
-    pub fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<State>) -> Self {
+impl<T: SimulationBackend + 'static> Scene<T> {
+    pub fn new() -> Self {
+        Self {
+            world: T::World::default(),
+            events: Vec::new(),
+        }
+    }
+
+    pub fn run(self) -> anyhow::Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            env_logger::init();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            console_log::init_with_level(log::Level::Info).unwrap_throw();
+        }
+
+        let (world, timeline) = T::finalize(self.world, self.events);
+        let event_loop = EventLoop::with_user_event().build()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut app = App::<T>::new(world, timeline);
+            event_loop.run_app(&mut app)?;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let app = App::new(&event_loop, world, timeline);
+            event_loop.spawn_app(app);
+        }
+
+        Ok(())
+    }
+}
+
+impl Scene<Mpm> {
+    pub fn add(&mut self, object: impl MpmObject + 'static) {
+        self.events.push(MpmSceneEvent::Add(Box::new(object)));
+    }
+
+    /// delay by seconds of sim time (not real world time)
+    pub fn wait(&mut self, seconds: f32) {
+        self.events.push(MpmSceneEvent::Wait(seconds));
+    }
+
+    pub fn environment(&mut self, env: impl MpmEnvironment) {
+        env.build(self);
+    }
+}
+
+impl Scene<Sph> {
+    pub fn add(&mut self, object: impl SphObject) {
+        object.insert(&mut self.world);
+    }
+}
+
+pub struct App<T: SimulationBackend> {
+    #[cfg(target_arch = "wasm32")]
+    proxy: Option<winit::event_loop::EventLoopProxy<State<T>>>,
+    world: Option<T::World>,
+    timeline: Option<MpmTimeline>,
+    state: Option<State<T>>,
+}
+
+impl<T: SimulationBackend> App<T> {
+    pub fn new(
+        #[cfg(target_arch = "wasm32")] event_loop: &EventLoop<State<T>>,
+        world: T::World,
+        timeline: MpmTimeline,
+    ) -> Self {
         #[cfg(target_arch = "wasm32")]
         let proxy = Some(event_loop.create_proxy());
         Self {
+            world: Some(world),
+            timeline: Some(timeline),
             state: None,
             #[cfg(target_arch = "wasm32")]
             proxy,
@@ -720,7 +641,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler<State> for App {
+impl<T: SimulationBackend + 'static> ApplicationHandler<State<T>> for App<T> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         #[allow(unused_mut)]
         let mut window_attributes = Window::default_attributes();
@@ -740,24 +661,26 @@ impl ApplicationHandler<State> for App {
         }
 
         let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
+        let world = self.world.take().expect("scene world already consumed");
+        let timeline = self
+            .timeline
+            .take()
+            .expect("scene timeline already consumed");
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // If we are not on web we can use pollster to
-            // await the
-            self.state = Some(pollster::block_on(State::new(window)).unwrap());
+            self.state =
+                Some(pollster::block_on(State::<T>::new(window, world, timeline)).unwrap());
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            // Run the future asynchronously and use the
-            // proxy to send the results to the event loop
             if let Some(proxy) = self.proxy.take() {
                 wasm_bindgen_futures::spawn_local(async move {
                     assert!(
                         proxy
                             .send_event(
-                                State::new(window)
+                                State::<T>::new(window, world, timeline)
                                     .await
                                     .expect("Unable to create canvas!!!")
                             )
@@ -769,7 +692,7 @@ impl ApplicationHandler<State> for App {
     }
 
     #[allow(unused_mut)]
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: State) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: State<T>) {
         #[cfg(target_arch = "wasm32")]
         {
             event.window.request_redraw();
@@ -833,28 +756,9 @@ impl ApplicationHandler<State> for App {
 }
 
 pub fn run() -> anyhow::Result<()> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        env_logger::init();
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        console_log::init_with_level(log::Level::Info).unwrap_throw();
-    }
-
-    let event_loop = EventLoop::with_user_event().build()?;
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let mut app = App::new();
-        event_loop.run_app(&mut app)?;
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let app = App::new(&event_loop);
-        event_loop.spawn_app(app);
-    }
-
-    Ok(())
+    let mut scene = Scene::<Mpm>::new();
+    scene.environment(PumpAtCube::default());
+    scene.run()
 }
 
 #[cfg(target_arch = "wasm32")]

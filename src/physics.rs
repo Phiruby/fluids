@@ -1,10 +1,18 @@
 mod mpm;
+mod objects;
 mod pipelines;
 mod sph;
 use nalgebra::Vector3;
 use std::ops::Add;
 
-pub use mpm::{MpmFluidSim, mpm_collider_bounds, mpm_grid_bounds};
+pub use mpm::{
+    MPM_BOTTOM_LEFT, MPM_DT, MPM_DX, MPM_N, MPM_SUBSTEPS, MpmFluidSim, mpm_collider_bounds,
+    mpm_frame_dt, mpm_grid_bounds,
+};
+pub use objects::{
+    FluidCube, InflowSource, MpmObject, MpmWorld, RigidBody, RigidBox, RigidPipe, SphObject,
+    SphWorld,
+};
 pub(crate) use pipelines::PrefixSum;
 pub use sph::boundaries::ContainerBoundary;
 pub use sph::fluids::FluidSim;
@@ -298,29 +306,6 @@ pub struct MpmGridNode {
     pub force_z: f32,
 }
 
-/// n x n x n cube of fluid particles
-pub fn fluid_cube(n: usize, spacing: f32, origin: Vector3<f32>) -> Vec<FluidParticle> {
-    let mut particles = Vec::with_capacity(n * n * n);
-    for i in 0..n {
-        for j in 0..n {
-            for k in 0..n {
-                particles.push(FluidParticle {
-                    position: [
-                        origin.x + i as f32 * spacing,
-                        origin.y + j as f32 * spacing,
-                        origin.z + k as f32 * spacing,
-                    ],
-                    normal: FLUID_COLOR,
-                    mass: 1.0,
-                    boundary: 1,
-                    ..Default::default()
-                });
-            }
-        }
-    }
-    particles
-}
-
 fn mpm_quadratic_kernel(r: f32) -> f32 {
     let ar = r.abs();
     if ar < 0.5 {
@@ -389,9 +374,8 @@ pub fn mpm_lattice_rest_density(spacing: f32, mass: f32, dx: f32) -> f32 {
                 let rx = (cx as f32 * dx - p[0]) / dx;
                 let ry = (cy as f32 * dx - p[1]) / dx;
                 let rz = (cz as f32 * dx - p[2]) / dx;
-                let w = mpm_quadratic_kernel(rx)
-                    * mpm_quadratic_kernel(ry)
-                    * mpm_quadratic_kernel(rz);
+                let w =
+                    mpm_quadratic_kernel(rx) * mpm_quadratic_kernel(ry) * mpm_quadratic_kernel(rz);
                 density += grid.get(&(cx, cy, cz)).copied().unwrap_or(0.0) * w;
             }
         }

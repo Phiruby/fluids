@@ -1,3 +1,4 @@
+#include <constants.wgsl>
 struct Particle {
     deformation_gradient: mat3x3<f32>,
     B: mat3x3<f32>,
@@ -29,9 +30,6 @@ struct GridParticle {
     force_z: atomic<u32>,
 }
 
-const DX: f32 = 0.02;
-const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const N: u32 = 32u;
 const D_INV = 4.0 / (DX * DX);
 const EOS_STIFFNESS = 100000.0;
 const EOS_POWER = 7.0;
@@ -184,16 +182,11 @@ fn scatter_mass_momentum(
                 let total_velocity = velocity + affine_contribution;
                 let mass_contribution = weight * mass;
                 let momentum_contribution = mass_contribution * total_velocity;
-                let gravity_force = -weight * mass * vec3<f32>(0.0, 9.81, 0.0);
-
                 let idx = get_grid_index(vec3<u32>(current_coord));
                 atomic_add_mass(idx, mass_contribution);
                 atomic_add_momentum_x(idx, momentum_contribution.x);
                 atomic_add_momentum_y(idx, momentum_contribution.y);
                 atomic_add_momentum_z(idx, momentum_contribution.z);
-                atomic_add_force_x(idx, gravity_force.x);
-                atomic_add_force_y(idx, gravity_force.y);
-                atomic_add_force_z(idx, gravity_force.z);
             }
         }
     }
@@ -205,6 +198,8 @@ fn particles_to_grid(@builtin(global_invocation_id) id: vec3<u32>) {
     let p_idx = id.x;
     if p_idx >= arrayLength(&particles) { return; }
     let p = particles[p_idx];
+    // for out-of-scene particles (e.g fluid particles waiting to be pumped in)
+    if p.position.x > 50.0 { return; }
     scatter_mass_momentum(p.position, p.velocity, p.B, p.mass);
 }
 
@@ -251,6 +246,7 @@ fn fluid_particles_to_grid_stress(@builtin(global_invocation_id) id: vec3<u32>) 
     if p_idx >= arrayLength(&particles) { return; }
 
     let p = particles[p_idx];
+    if p.position.x > 50.0 { return; }
     let relative = (p.position - BOTTOM_LEFT) / DX;
     let base_coord = vec3<i32>(floor(relative - 0.5));
 

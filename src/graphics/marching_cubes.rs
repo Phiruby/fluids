@@ -273,13 +273,7 @@ impl CompactIndices {
             pass.dispatch_workgroups(NUM_VOXELS.div_ceil(WG_SIZE), 1, 1);
         }
 
-        encoder.copy_buffer_to_buffer(
-            &self.offsets,
-            NUM_VOXELS as u64 * 4,
-            &self.indirect,
-            0,
-            4,
-        );
+        encoder.copy_buffer_to_buffer(&self.offsets, NUM_VOXELS as u64 * 4, &self.indirect, 0, 4);
     }
 
     fn index_buffer(&self) -> &wgpu::Buffer {
@@ -307,7 +301,8 @@ pub struct MarchingCubes {
 
 impl MarchingCubes {
     pub fn new(device: &wgpu::Device) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("marching_cubes.wgsl"));
+        let module =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/marching_cubes.wgsl"));
         let layout = mc_bind_group_layout(device, "marching cubes");
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("marching cubes"),

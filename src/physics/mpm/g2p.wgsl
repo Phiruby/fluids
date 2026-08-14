@@ -1,4 +1,5 @@
 #include <../svd.wgsl>
+#include <constants.wgsl>
 
 struct Particle {
     deformation_gradient: mat3x3<f32>,
@@ -34,9 +35,6 @@ struct ColliderUniform {
     max: vec3<f32>,
 }
 
-const DX: f32 = 0.02;
-const BOTTOM_LEFT: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const N: u32 = 32u;
 const D_INV = 4.0 / (DX * DX);
 const DT = 0.0001;
 
@@ -144,6 +142,7 @@ fn fluid_grid_to_particles(@builtin(global_invocation_id) id: vec3<u32>) {
     let p_idx = id.x;
     if p_idx >= arrayLength(&particles) { return; }
     var p = particles[p_idx];
+    if p.position.x > 50.0 { return; }
 
     let updates = get_updates(p.position);
     p.velocity = updates.new_v;

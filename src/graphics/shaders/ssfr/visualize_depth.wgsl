@@ -11,12 +11,13 @@ struct CameraUniform {
 @group(0) @binding(0) var normals_texture: texture_2d<f32>;
 @group(0) @binding(1) var thickness_texture: texture_2d<f32>;
 @group(0) @binding(2) var depth_texture: texture_2d<f32>;
+@group(0) @binding(3) var background_texture: texture_2d<f32>;
 @group(1) @binding(0) var<uniform> ubo: CameraUniform;
 
 const N1 = 1.0;
 const N2 = 1.33; // water
-const LIGHT_POS_WORLD = vec3<f32>(0.5, 2.0, 1.5);
-const FLUID_COLOR = vec3<f32>(0.05, 0.35, 0.75);
+const LIGHT_POS_WORLD = vec3<f32>(1.1, 2.6, 2.0);
+const FLUID_COLOR = vec3<f32>(0.05, 0.42, 0.72);
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -61,8 +62,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let normal_sample = textureLoad(normals_texture, pixel, 0);
     let eye_depth = textureLoad(depth_texture, pixel, 0).r;
     let thickness = textureLoad(thickness_texture, pixel, 0).r;
+    let background = textureLoad(background_texture, pixel, 0).rgb;
     if normal_sample.a < 0.5 || eye_depth <= 1e-5 {
-        discard;
+        return vec4(background, 1.0);
     }
 
     // computed normals are already in view space
@@ -82,13 +84,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     // eq (14) in "screen space fluid rendering with curvature flow"
     let transmittance = exp(-thickness);
-    let background = vec3<f32>(0.02, 0.04, 0.08);
+    // TODO: can add defraction as discussed in paper as well
     let a = mix(FLUID_COLOR, background, transmittance);
     let specular = vec3<f32>(0.85) * pow(n_dot_h, 128.0);
 
     // Eq (13)
     // NOTE: reflected is placeholder env reflection
-    let reflected = vec3<f32>(0.15, 0.18, 0.22);
+    let reflected = vec3<f32>(0.82, 0.74, 0.62);
     let cout = (a) * (1.0 - f_val) + reflected * f_val + specular;
 
     return vec4(cout, 1.0);
