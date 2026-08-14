@@ -19,6 +19,7 @@ fn main() {
     scene.run().unwrap();
 }
 ```
+![](demos/mpm-densities.mp4)
 
 2. Pump water at a light rigid block:
 ```rs
@@ -30,6 +31,7 @@ fn main() {
     scene.run().unwrap();
 }
 ```
+![](demos/mpm-pump.mp4)
 
 ## SPH
 SPH has fewer features than MPM for now (fluid-solid interactions are not implemented in SPH). For now the only thing we can do
@@ -44,6 +46,7 @@ fn main() {
     scene.run().unwrap();
 }
 ```
+![](demos/sph-fluid.mp4)
 
 # Useful readings
 
@@ -66,3 +69,19 @@ Lots of wgpu graphics boilerplate (e.g vertex / index / uniform buffers, depth b
 
 1. Marching Cubes: https://www.willusher.io/graphics/2024/04/22/webgpu-marching-cubes/
 2. Screen space fluid rendering: https://www.researchgate.net/publication/220792184_Screen_space_fluid_rendering_with_curvature_flow
+
+# Implementation
+
+## MPM
+Here is an overview of the series of shaders that MPM performs (see `MPMFluidSim` in mpm.rs):
+![Logo](docs/mpm-dag.png)
+
+P2G, Grid Simulator, and G2P are standard in MPM. Here are the additional bits:
+1. Emit: to implement a pipe pumping water, we need to store the particles somewhere (not all particles fit the pipe). These are stored off-world. Emit brings the off-world particles into the pipe
+2. Inflow: updates momentum of grid nodes inside the pipe to contain the momentum based on the passed in `flow` parameter
+
+## SPH
+SPH shader dag is simpler:
+```
+Spatial hash -> compute particle fluid density -> compute forces and perform particle advection
+```
