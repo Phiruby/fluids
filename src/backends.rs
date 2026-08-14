@@ -1,6 +1,10 @@
 use crate::graphics::SCENE_CLEAR;
-use crate::physics::{InflowSource, MpmWorld, RigidBody, SphWorld, MpmFluidParticle, MpmElasticParticle, MpmFluidSim, MpmObject};
+use crate::physics::{
+    InflowSource, MpmElasticParticle, MpmFluidParticle, MpmFluidSim, MpmObject, MpmWorld,
+    RigidBody, SphWorld,
+};
 use crate::{FLUID_RENDER_MODE, FluidRenderMode, MPM_MATERIAL, MpmMaterial, State};
+use std::collections::VecDeque;
 
 /// parked far from the domain so P2G/G2P skip them (x > 50 condition in shaders), but y < 0 so emit
 /// does not treat them as pipe reservoir particles.
@@ -57,9 +61,8 @@ struct DeferredSpawn {
 #[derive(Default)]
 pub struct MpmTimeline {
     sim_time: f32,
-    pending: Vec<DeferredSpawn>,
+    pending: VecDeque<DeferredSpawn>,
 }
-
 
 impl MpmTimeline {
     pub fn tick(&mut self, dt: f32, queue: &wgpu::Queue, sim: &MpmFluidSim) {
@@ -67,14 +70,9 @@ impl MpmTimeline {
             return;
         }
         self.sim_time += dt;
-        let mut i = 0;
-        while i < self.pending.len() {
-            if self.sim_time + 1e-8 >= self.pending[i].at_time {
-                let spawn = self.pending.remove(i);
-                spawn.upload(queue, sim);
-            } else {
-                i += 1;
-            }
+        while !self.pending.is_empty() && self.pending.front().unwrap().at_time <= self.sim_time + 1e-8 {
+            let spawn = self.pending.pop_front().unwrap();
+            spawn.upload(queue, sim);
         }
     }
 }
@@ -93,7 +91,6 @@ impl DeferredSpawn {
         }
     }
 }
-
 
 pub enum Mpm {}
 pub enum Sph {}
@@ -342,10 +339,9 @@ impl SimulationBackend for Sph {
     }
 }
 
-
 pub(crate) fn bake_mpm(mut world: MpmWorld, events: Vec<MpmSceneEvent>) -> (MpmWorld, MpmTimeline) {
     let mut at_time = 0.0;
-    let mut pending = Vec::new();
+    let mut pending = VecDeque::new();
     for event in events {
         match event {
             MpmSceneEvent::Wait(seconds) => {
@@ -356,7 +352,7 @@ pub(crate) fn bake_mpm(mut world: MpmWorld, events: Vec<MpmSceneEvent>) -> (MpmW
                 let particle_start = world.fluid_particles.len();
                 object.insert(&mut world);
                 if at_time > 0.0 {
-                    pending.push(hide_inserted(
+                    pending.push_back(hide_inserted(
                         &mut world,
                         at_time,
                         rigid_start,
@@ -375,6 +371,8 @@ pub(crate) fn bake_mpm(mut world: MpmWorld, events: Vec<MpmSceneEvent>) -> (MpmW
     )
 }
 
+/// update world's rigid_start and particle_start (in their respective buffers)
+/// so their position is in a hidden location
 fn hide_inserted(
     world: &mut MpmWorld,
     at_time: f32,
@@ -394,11 +392,11 @@ fn hide_inserted(
     world.rigid_bodies[rigid_start] = hidden;
 
     let mut particles = Vec::new();
-    for i in particle_start..world.fluid_particles.len() {
-        let live = world.fluid_particles[i];
-        particles.push((i as u32, live));
-        world.fluid_particles[i].position = PARK_HIDDEN;
-        world.fluid_particles[i].velocity = [0.0; 3];
+    if world.fluid_particles.len() > particle_start {
+        let live = world.fluid_particles[particle_start];
+        particles.push((particle_start as u32, live));
+        world.fluid_particles[particle_start].position = PARK_HIDDEN;
+        world.fluid_particles[particle_start].velocity = [0.0; 3];
     }
     DeferredSpawn {
         at_time,

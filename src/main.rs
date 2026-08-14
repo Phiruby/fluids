@@ -1,4 +1,4 @@
-use fluids::{Mpm, MultiBoxWaterCube, Scene, PumpAtCube};
+use fluids::{Mpm, MultiBoxWaterCube, PumpAtCube, Scene};
 
 fn main() {
     let mut scene = Scene::<Mpm>::new();

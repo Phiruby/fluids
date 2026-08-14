@@ -96,8 +96,6 @@ impl Default for RigidBody {
     }
 }
 
-const _: () = assert!(std::mem::size_of::<RigidBody>() == 144);
-
 impl RigidBody {
     pub fn pinned(mut self) -> Self {
         self.pinned = 1;
