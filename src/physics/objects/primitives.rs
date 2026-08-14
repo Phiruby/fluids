@@ -1,9 +1,12 @@
 use super::{MpmObject, MpmWorld, SphObject, SphWorld};
 use crate::physics::objects::sdf::AnalyticalSdf;
 use crate::physics::objects::sdf::InflowSource;
-use crate::physics::{FLUID_COLOR, FluidParticle, MpmFluidParticle, mpm_fluid_block};
+use crate::physics::{FLUID_COLOR, FluidParticle, MpmFluidParticle, mpm_fluid_block, mpm_elastic_block};
 use crate::physics::{MPM_DX, mpm_lattice_rest_density};
 use nalgebra::Vector3;
+
+const PIPE_FLUID_N: usize = 32;
+
 pub struct RigidBox {
     pub center: [f32; 3],
     pub half_extents: [f32; 3],
@@ -46,6 +49,27 @@ impl RigidBox {
     }
 }
 
+pub struct ElasticBox {
+    pub center: [f32; 3],
+    pub nparticles: [usize; 3],
+    pub spacing: f32,
+    pub poisson_ratio: f32,
+    pub youngs_modulus: f32,
+}
+
+impl MpmObject for ElasticBox {
+    fn insert(&self, world: &mut MpmWorld) {
+        let particles = mpm_elastic_block(
+            self.nparticles[0],
+            self.nparticles[1],
+            self.nparticles[2],
+            self.spacing,
+            Vector3::from(self.center),
+        );
+        world.elastic_particles.extend(particles);
+    }
+}
+
 impl MpmObject for RigidBox {
     fn insert(&self, world: &mut MpmWorld) {
         let i = AnalyticalSdf::Box {
@@ -58,8 +82,6 @@ impl MpmObject for RigidBox {
         }
     }
 }
-
-const PIPE_FLUID_N: usize = 32;
 
 pub struct RigidPipe {
     pub center: [f32; 3],

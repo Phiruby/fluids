@@ -34,7 +34,7 @@ use winit::{
 
 pub use crate::backends::{Mpm, SimBackend, Sph};
 pub use crate::environments::{MpmEnvironment, MultiBoxWaterCube, PumpAtCube};
-pub use crate::physics::{FluidCube, MPM_DX, MPM_N, MpmObject, RigidBox, RigidPipe, SphObject};
+pub use crate::physics::{ElasticBox, FluidCube, MPM_DX, MPM_N, MpmObject, RigidBox, RigidPipe, SphObject};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FluidRenderMode {

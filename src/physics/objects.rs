@@ -1,7 +1,7 @@
 use crate::physics::{FluidParticle, MpmElasticParticle, MpmFluidParticle, mpm_fluid_block};
 mod primitives;
 mod sdf;
-pub use primitives::{FluidCube, RigidBox, RigidPipe};
+pub use primitives::{FluidCube, RigidBox, RigidPipe, ElasticBox};
 pub use sdf::{InflowSource, RigidBody};
 
 #[derive(Default)]

@@ -11,7 +11,7 @@ pub use mpm::{
 };
 pub use objects::{
     FluidCube, InflowSource, MpmObject, MpmWorld, RigidBody, RigidBox, RigidPipe, SphObject,
-    SphWorld,
+    SphWorld, ElasticBox,
 };
 pub(crate) use pipelines::PrefixSum;
 pub use sph::boundaries::ContainerBoundary;

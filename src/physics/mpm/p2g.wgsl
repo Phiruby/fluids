@@ -285,7 +285,7 @@ fn fluid_particles_to_grid_stress(@builtin(global_invocation_id) id: vec3<u32>) 
     push_to_grid(p.position, volume, stress);
 }
 
-const POISSON_RATIO = 0.1;
+const POISSON_RATIO = 0.2;
 const YOUNG = 100000.0;
 const MU = YOUNG / (2.0 * (1.0 + POISSON_RATIO));
 const LAMBDA = YOUNG * POISSON_RATIO / ((1.0 + POISSON_RATIO) * (1.0 - 2.0 * POISSON_RATIO));
