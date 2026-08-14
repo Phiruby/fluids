@@ -119,7 +119,7 @@ impl<P: RenderParticle> RenderPipeline<P> {
         surface_format: wgpu::TextureFormat,
         particle_radius: f32,
     ) -> Self {
-        let shader_src = include_str!("particle_render.wgsl")
+        let shader_src = include_str!("shaders/particle_render.wgsl")
             .replace("${INSTANCE_FIELDS}", P::instance_wgsl_fields())
             .replace("${VS_MAIN_BODY}", P::vs_main_body());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -333,6 +333,7 @@ impl WireframeBoxPipeline {
     }
 }
 
+/// uses analytical sdf (see sdf.rs) and uses ray marching to render the object
 pub struct RigidBodyPipeline {
     pipeline: wgpu::RenderPipeline,
     bodies_layout: wgpu::BindGroupLayout,
@@ -347,7 +348,7 @@ impl RigidBodyPipeline {
         global_bind_group_layout: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("rigid_render.wgsl"));
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/rigid_render.wgsl"));
         let bodies_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rigid bodies"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -459,7 +460,7 @@ pub struct SkyPipeline {
 
 impl SkyPipeline {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("sky.wgsl"));
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/sky.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky"),
             bind_group_layouts: &[],

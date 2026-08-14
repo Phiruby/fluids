@@ -5,7 +5,8 @@ use std::marker::PhantomData;
 use wgpu::util::DeviceExt;
 
 fn ssfr_particle_shader<P: GpuParticle>(device: &wgpu::Device) -> wgpu::ShaderModule {
-    let src = include_str!("fluid_depth.wgsl").replace("${PARTICLE_FIELDS}", P::wgsl_fields());
+    let src = include_str!("shaders/ssfr/fluid_depth.wgsl")
+        .replace("${PARTICLE_FIELDS}", P::wgsl_fields());
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("ssfr particle depth/thickness"),
         source: wgpu::ShaderSource::Wgsl(Cow::Owned(src)),
@@ -27,7 +28,8 @@ struct FluidCompaction {
 
 impl FluidCompaction {
     pub fn new(device: &wgpu::Device, nparticles: u32) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("fluid_compaction.wgsl"));
+        let module =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/ssfr/fluid_compaction.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fluid compaction"),
             entries: &[
@@ -560,7 +562,8 @@ impl CurvatureFlow {
         focal_x: f32,
         focal_y: f32,
     ) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("curvature_flow.wgsl"));
+        let module =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/ssfr/curvature_flow.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("curvature flow"),
             entries: &[
@@ -819,7 +822,8 @@ impl DepthViz {
         surface_format: wgpu::TextureFormat,
         uniform_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
-        let module = device.create_shader_module(wgpu::include_wgsl!("visualize_depth.wgsl"));
+        let module =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/ssfr/visualize_depth.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("depth viz"),
             entries: &[
