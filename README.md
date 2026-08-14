@@ -19,7 +19,7 @@ fn main() {
     scene.run().unwrap();
 }
 ```
-![](demos/mpm-densities.mp4)
+https://github.com/user-attachments/assets/2bf3a82e-9c88-432d-b1c6-d244d0644556
 
 2. Pump water at a light rigid block:
 ```rs
@@ -31,7 +31,7 @@ fn main() {
     scene.run().unwrap();
 }
 ```
-![](demos/mpm-pump.mp4)
+https://github.com/user-attachments/assets/f270b7b0-e7b8-48e3-863f-22052df417a6
 
 ## SPH
 SPH has fewer features than MPM for now (fluid-solid interactions are not implemented in SPH). For now the only thing we can do
@@ -46,7 +46,7 @@ fn main() {
     scene.run().unwrap();
 }
 ```
-![](demos/sph-fluid.mp4)
+https://github.com/user-attachments/assets/8498cc32-5fcc-4ba2-a707-cc20cac0cc2f
 
 # Useful readings
 
