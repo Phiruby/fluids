@@ -6,15 +6,14 @@ use crate::physics::{
 };
 use nalgebra::{UnitQuaternion, Vector3};
 
-
-pub trait MpmEnvironment {
-    fn build(&self, scene: &mut Scene<Mpm>);
-}
-
 const POOL_NX: usize = 64;
 const POOL_NY: usize = 32;
 const POOL_NZ: usize = 64;
 const POOL_SPACING: f32 = 0.01;
+
+pub trait MpmEnvironment {
+    fn build(&self, scene: &mut Scene<Mpm>);
+}
 
 fn pool_particle_count() -> usize {
     POOL_NX * POOL_NY * POOL_NZ

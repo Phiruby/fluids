@@ -1,12 +1,11 @@
-mod objects;
+mod boundaries;
 
 use crate::load_wgsl;
 use crate::physics::{InflowSource, MpmElasticParticle, MpmFluidParticle, MpmGridNode, RigidBody};
 
 use wgpu::util::DeviceExt;
 
-pub use objects::mpm_collider_bounds;
-
+pub use boundaries::mpm_collider_bounds;
 
 pub const MPM_N: u32 = 64;
 pub const MPM_DX: f32 = 0.02;
@@ -261,7 +260,7 @@ impl GridSimulation {
             cache: Default::default(),
             compilation_options: Default::default(),
         });
-        let (min, max) = objects::mpm_collider_bounds();
+        let (min, max) = boundaries::mpm_collider_bounds();
         let collider_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mpm collider"),
             contents: bytemuck::bytes_of(&ColliderUniform {

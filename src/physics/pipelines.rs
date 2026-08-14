@@ -240,6 +240,7 @@ pub struct SpatialHashGPU {
     pub(in crate::physics) hash_offsets_buf: wgpu::Buffer,
     sorted: wgpu::Buffer,
     max_particles: u32,
+    #[allow(unused)]
     buffer_debug: BufferDebug,
 }
 
@@ -252,7 +253,6 @@ impl SpatialHashGPU {
             label: Some("spatial hash"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&shader_string)),
         });
-        // Explicit layout: auto layout from `build_hash_table` only sees 2 bindings.
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("spatial hash"),
             entries: &[

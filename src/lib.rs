@@ -5,6 +5,7 @@ mod graphics;
 mod physics;
 mod texture;
 use crate::backends::SimulationBackend;
+use crate::backends::{MpmSceneEvent, MpmTimeline};
 use crate::camera::CameraController;
 use crate::graphics::{
     MarchingCubes, MarchingCubesRenderPipeline, RenderPipeline, RigidBodyPipeline,
@@ -14,7 +15,6 @@ use crate::physics::{
     ContainerBoundary, CubicKernel, FluidParticle, FluidSim, MpmElasticParticle, MpmFluidParticle,
     MpmFluidSim, assign_rest_densities, mpm_collider_bounds, mpm_frame_dt, mpm_grid_bounds,
 };
-use crate::backends::{MpmSceneEvent, MpmTimeline};
 use crate::texture::Texture;
 use bytemuck;
 use cgmath::SquareMatrix;
@@ -55,7 +55,7 @@ const FLUID_RENDER_MODE: FluidRenderMode = FluidRenderMode::ScreenSpaceFluidRend
 const MPM_MATERIAL: MpmMaterial = MpmMaterial::Fluid;
 
 const FLUID_SPACING: f32 = 0.03;
-const FLUID_PARTICLE_RADIUS: f32 = 0.020;
+const FLUID_PARTICLE_RADIUS: f32 = 0.30;
 const FLUID_CELL_SIZE: f32 = 0.1;
 const FLUID_CONTAINER_LAYERS: usize = 2;
 const FLUID_WORKGROUP: usize = 256;
@@ -609,7 +609,6 @@ impl Scene<Mpm> {
     }
 }
 
-
 impl Scene<Sph> {
     pub fn add(&mut self, object: impl SphObject) {
         object.insert(&mut self.world);
@@ -663,13 +662,15 @@ impl<T: SimulationBackend + 'static> ApplicationHandler<State<T>> for App<T> {
 
         let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
         let world = self.world.take().expect("scene world already consumed");
-        let timeline = self.timeline.take().expect("scene timeline already consumed");
+        let timeline = self
+            .timeline
+            .take()
+            .expect("scene timeline already consumed");
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.state = Some(
-                pollster::block_on(State::<T>::new(window, world, timeline)).unwrap(),
-            );
+            self.state =
+                Some(pollster::block_on(State::<T>::new(window, world, timeline)).unwrap());
         }
 
         #[cfg(target_arch = "wasm32")]
