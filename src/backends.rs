@@ -70,7 +70,9 @@ impl MpmTimeline {
             return;
         }
         self.sim_time += dt;
-        while !self.pending.is_empty() && self.pending.front().unwrap().at_time <= self.sim_time + 1e-8 {
+        while !self.pending.is_empty()
+            && self.pending.front().unwrap().at_time <= self.sim_time + 1e-8
+        {
             let spawn = self.pending.pop_front().unwrap();
             spawn.upload(queue, sim);
         }

@@ -10,8 +10,8 @@ pub use mpm::{
     mpm_frame_dt, mpm_grid_bounds,
 };
 pub use objects::{
-    FluidCube, InflowSource, MpmObject, MpmWorld, RigidBody, RigidBox, RigidPipe, SphObject,
-    SphWorld, ElasticBox,
+    ElasticBox, FluidCube, InflowSource, MpmObject, MpmWorld, RigidBody, RigidBox, RigidPipe,
+    SphObject, SphWorld,
 };
 pub(crate) use pipelines::PrefixSum;
 pub use sph::boundaries::ContainerBoundary;
