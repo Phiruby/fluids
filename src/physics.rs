@@ -398,7 +398,7 @@ pub fn mpm_fluid_block(
     let rest_volume = spacing * spacing * spacing;
     let density = 1000.0;
     let mass = density * rest_volume;
-    let rest_density = mpm_lattice_rest_density(spacing, mass, mpm::MPM_DX);
+    let rest_density = mpm_lattice_rest_density(spacing, mass, mpm::MPM_DX) / 1.25;
     let mut particles = Vec::with_capacity(nx * ny * nz);
     for i in 0..nx {
         for j in 0..ny {
