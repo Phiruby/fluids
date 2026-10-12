@@ -8,7 +8,9 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "bpy>=4.4.0",
     "numpy>=2.4.6",
+    "typer>=0.27.3",
 ]
 
 [project.scripts]
@@ -20,7 +22,7 @@ build-backend = "uv_build"
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+platforms = ["linux-64", "win-64"]
 
 [tool.pixi.pypi-dependencies]
 fluids = { path = ".", editable = true }
