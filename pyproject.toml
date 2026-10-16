@@ -31,4 +31,4 @@ fluids = { path = ".", editable = true }
 
 [tool.pixi.dependencies]
 openvdb = ">=13.1.0,<14"
-numpy = ">=2.5.3,<3"
+numpy = ">=2.4.6"
