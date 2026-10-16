@@ -3,6 +3,8 @@ mod boundaries;
 use crate::load_wgsl;
 use crate::physics::{InflowSource, MpmElasticParticle, MpmFluidParticle, MpmGridNode, RigidBody};
 
+use flume::bounded;
+use std::io::Write;
 use wgpu::util::DeviceExt;
 
 pub use boundaries::mpm_collider_bounds;
@@ -768,6 +770,24 @@ fn particle_storage_buffer<T: bytemuck::Pod + bytemuck::Zeroable>(
     })
 }
 
+struct GridExport {
+    staging: wgpu::Buffer,
+    frame: u32,
+    pending: bool,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct GridExportHeader {
+    magic: [u8; 4],
+    n: u32,
+    frame: u32,
+    dx: f32,
+    origin: [f32; 3],
+}
+
+const _: () = assert!(size_of::<GridExportHeader>() == 28);
+
 pub struct MpmFluidSim {
     p2g: P2G,
     inflow: Inflow,
@@ -783,6 +803,7 @@ pub struct MpmFluidSim {
     num_elastic: u32,
     num_rigid: u32,
     num_inflow: u32,
+    grid_export: Option<GridExport>,
 }
 
 impl MpmFluidSim {
@@ -792,6 +813,7 @@ impl MpmFluidSim {
         elastic_particles: &[MpmElasticParticle],
         rigid_bodies: &[RigidBody],
         inflow_sources: &[InflowSource],
+        export_grid: bool,
     ) -> Self {
         let num_particles = particles.len() as u32;
         let num_elastic = elastic_particles.len() as u32;
@@ -802,6 +824,16 @@ impl MpmFluidSim {
             particle_storage_buffer(device, "mpm elastic particles", elastic_particles);
         let rigid_bodies = particle_storage_buffer(device, "mpm rigid bodies", rigid_bodies);
         let inflow_sources = particle_storage_buffer(device, "mpm inflow sources", inflow_sources);
+        let grid_export = export_grid.then(|| GridExport {
+            staging: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mpm grid export"),
+                size: size_of::<MpmGridNode>() as u64 * N * N * N,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            frame: 1,
+            pending: false,
+        });
         Self {
             p2g: P2G::new(device),
             inflow: Inflow::new(device),
@@ -817,19 +849,29 @@ impl MpmFluidSim {
             num_elastic,
             num_rigid,
             num_inflow,
+            grid_export,
         }
     }
 
-    pub fn step(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+    pub fn step(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
         if self.num_particles == 0 && self.num_elastic == 0 && self.num_rigid == 0 {
             return;
         }
-        for _ in 0..MPM_SUBSTEPS {
-            self.substep(device, encoder);
+        let capture = self.grid_export.is_some();
+        for i in 0..MPM_SUBSTEPS {
+            self.substep(device, encoder, capture && i + 1 == MPM_SUBSTEPS);
+        }
+        if let Some(export) = &mut self.grid_export {
+            export.pending = true;
         }
     }
 
-    fn substep(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+    fn substep(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        capture_grid: bool,
+    ) {
         encoder.clear_buffer(&self.p2g.grid, 0, None);
         self.emit.compute(
             device,
@@ -850,6 +892,16 @@ impl MpmFluidSim {
         );
         self.grid_simulation
             .compute(device, encoder, &self.p2g.grid, &self.rigid_bodies);
+        if capture_grid {
+            let export = self.grid_export.as_ref().unwrap();
+            encoder.copy_buffer_to_buffer(
+                &self.p2g.grid,
+                0,
+                &export.staging,
+                0,
+                self.p2g.grid.size(),
+            );
+        }
         self.inflow.compute(
             device,
             encoder,
@@ -911,6 +963,51 @@ impl MpmFluidSim {
             start as u64 * std::mem::size_of::<RigidBody>() as u64,
             bytemuck::cast_slice(bodies),
         );
+    }
+
+    pub fn write_grid_export(&mut self, device: &wgpu::Device) -> std::io::Result<()> {
+        let Some(export) = &mut self.grid_export else {
+            return Ok(());
+        };
+        if !export.pending {
+            return Ok(());
+        }
+        export.pending = false;
+
+        let size = export.staging.size();
+        let (tx, rx) = bounded(1);
+        export
+            .staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll while waiting for grid export");
+        rx.recv()
+            .expect("grid export map callback closed")
+            .expect("grid export map failed");
+        let nodes = {
+            let data = export.staging.slice(..size).get_mapped_range();
+            data.to_vec()
+        };
+        export.staging.unmap();
+
+        let frame = export.frame;
+        export.frame += 1;
+        let header = GridExportHeader {
+            magic: *b"MPMG",
+            n: MPM_N,
+            frame,
+            dx: MPM_DX,
+            origin: MPM_BOTTOM_LEFT,
+        };
+        std::fs::create_dir_all("data")?;
+        let mut file = std::fs::File::create(format!("data/grid_{frame:06}.bin"))?;
+        file.write_all(bytemuck::bytes_of(&header))?;
+        file.write_all(&nodes)?;
+        Ok(())
     }
 
     pub fn write_fluid_particles(
