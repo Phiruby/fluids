@@ -13,7 +13,7 @@ cargo run -- --export-grid
 fluids grid-to-vdb .. ..
 fluids render .. ..
 ```
-Produced with Blender cycles:
+Produced with Blender cycles (I doubled initial rest pressure so water shows explosive behavior at the beginning):
 
 https://github.com/user-attachments/assets/6400a96a-0db1-4c10-a94a-50b893081da9
 
