@@ -31,9 +31,7 @@ def water_material():
 
 def geometry_nodes(volume: bpy.types.Object, material, threshold: float):
     geo_modifier = volume.modifiers.new(name="WaterSurface", type="NODES")
-    tree = bpy.data.node_groups.new(
-        name="WaterSurfaceRender", type="GeometryNodeTree"
-    )
+    tree = bpy.data.node_groups.new(name="WaterSurfaceRender", type="GeometryNodeTree")
     geo_modifier.node_group = tree
 
     tree.interface.new_socket(
@@ -51,7 +49,7 @@ def geometry_nodes(volume: bpy.types.Object, material, threshold: float):
 
     volume_to_mesh = nodes.new(type="GeometryNodeVolumeToMesh")
     volume_to_mesh.location = (-350, 0)
-    volume_to_mesh.resolution_mode = "GRID"
+    volume_to_mesh.inputs["Resolution Mode"].default_value = "Grid"
     volume_to_mesh.inputs["Threshold"].default_value = threshold
     volume_to_mesh.inputs["Adaptivity"].default_value = 0.0
 
@@ -68,12 +66,8 @@ def geometry_nodes(volume: bpy.types.Object, material, threshold: float):
 
     links.new(input_node.outputs["Geometry"], volume_to_mesh.inputs["Volume"])
     links.new(volume_to_mesh.outputs["Mesh"], smoothing_node.inputs["Geometry"])
-    links.new(
-        smoothing_node.outputs["Geometry"], set_material_node.inputs["Geometry"]
-    )
-    links.new(
-        set_material_node.outputs["Geometry"], output_node.inputs["Geometry"]
-    )
+    links.new(smoothing_node.outputs["Geometry"], set_material_node.inputs["Geometry"])
+    links.new(set_material_node.outputs["Geometry"], output_node.inputs["Geometry"])
 
     return geo_modifier
 
@@ -118,9 +112,9 @@ def setup_camera():
     camera = bpy.context.active_object
     camera.name = "Camera"
 
-    direction = -camera.location
-    camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+    camera.rotation_euler = (np.radians(60.0), np.radians(0.0), np.radians(30.0))
     camera.data.lens = 50
+    camera.location = (2.3591, -3.7122, 2.3473)
 
     bpy.context.scene.camera = camera
 
@@ -137,9 +131,7 @@ def setup_lighting():
         light.data.energy = power
         light.data.shape = "DISK"
         light.data.size = size
-        light.rotation_euler = (
-            (-light.location).to_track_quat("-Z", "Y").to_euler()
-        )
+        light.rotation_euler = (-light.location).to_track_quat("-Z", "Y").to_euler()
 
 
 def setup_render(nframes: int, output_dir: Path):
@@ -150,7 +142,7 @@ def setup_render(nframes: int, output_dir: Path):
     for device in cycles_settings.devices:
         if device.type == cycles_settings.compute_device_type:
             device.use = True
-    
+
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.device = "GPU"
@@ -172,12 +164,8 @@ def setup_render(nframes: int, output_dir: Path):
 
 @app.command()
 def main(
-    vdb_dir: Path = typer.Argument(
-        ..., help="Directory containing the VDB sequence"
-    ),
-    output_dir: Path = typer.Argument(
-        ..., help="Directory to save rendered frames"
-    ),
+    vdb_dir: Path = typer.Argument(..., help="Directory containing the VDB sequence"),
+    output_dir: Path = typer.Argument(..., help="Directory to save rendered frames"),
     threshold: float = typer.Option(
         0.1, help="Threshold value for volume-to-mesh conversion"
     ),
@@ -197,13 +185,9 @@ def main(
     setup_lighting()
     setup_render(nframes, output_dir)
 
-    bpy.ops.wm.save_as_mainfile(
-        filepath=str((output_dir / "water.blend").resolve())
-    )
+    bpy.ops.wm.save_as_mainfile(filepath=str((output_dir / "water.blend").resolve()))
 
-    typer.echo(
-        f"Starting render of {nframes} frames to {output_dir.resolve()}..."
-    )
+    typer.echo(f"Starting render of {nframes} frames to {output_dir.resolve()}...")
     bpy.ops.render.render(animation=True)
     typer.echo("Rendering complete!")
 

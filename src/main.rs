@@ -9,8 +9,8 @@ fn main() {
     // scene.environment(PumpAtCube::default());
     scene.run().unwrap();
 
-    let mut scene = Scene::<Sph>::new();
-    let fluid = FluidCube::new(30, 0.03, [-0.95, 0.50, -0.7]);
-    scene.add(fluid);
-    scene.run().unwrap();
+    // let mut scene = Scene::<Sph>::new();
+    // let fluid = FluidCube::new(30, 0.03, [-0.95, 0.50, -0.7]);
+    // scene.add(fluid);
+    // scene.run().unwrap();
 }
