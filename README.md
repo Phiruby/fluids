@@ -13,7 +13,8 @@ cargo run -- --export-grid
 fluids grid-to-vdb .. ..
 fluids render .. ..
 ```
-Produced w/ Blender cycles:
+Produced with Blender cycles:
+
 https://github.com/user-attachments/assets/6400a96a-0db1-4c10-a94a-50b893081da9
 
 ## MPM
