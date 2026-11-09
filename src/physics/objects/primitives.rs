@@ -1,7 +1,9 @@
 use super::{MpmObject, MpmWorld, SphObject, SphWorld};
 use crate::physics::objects::sdf::AnalyticalSdf;
 use crate::physics::objects::sdf::InflowSource;
-use crate::physics::{FLUID_COLOR, FluidParticle, MpmFluidParticle, mpm_fluid_block, mpm_elastic_block};
+use crate::physics::{
+    FLUID_COLOR, FluidParticle, MpmFluidParticle, mpm_elastic_block, mpm_fluid_block,
+};
 use crate::physics::{MPM_DX, mpm_lattice_rest_density};
 use nalgebra::Vector3;
 

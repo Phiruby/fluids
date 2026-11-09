@@ -6,6 +6,16 @@ Currently supports both SPH and MLS-MPM backends for the simulations (see source
 
 # Demos
 
+Offline Blender Rendering now available!
+Run the simulation with
+```
+cargo run -- --export-grid
+fluids grid-to-vdb .. ..
+fluids render .. ..
+```
+Produced w/ Blender cycles:
+https://github.com/user-attachments/assets/6400a96a-0db1-4c10-a94a-50b893081da9
+
 ## MPM
 You can go ahead and create custom environments (see `environments.rs`) or custom objects (few examples in `primitives.rs`).
 I have created a few example environments ("environments" are just alternative words for animations):

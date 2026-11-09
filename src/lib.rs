@@ -34,7 +34,9 @@ use winit::{
 
 pub use crate::backends::{Mpm, SimBackend, Sph};
 pub use crate::environments::{MpmEnvironment, MultiBoxWaterCube, PumpAtCube};
-pub use crate::physics::{ElasticBox, FluidCube, MPM_DX, MPM_N, MpmObject, RigidBox, RigidPipe, SphObject};
+pub use crate::physics::{
+    ElasticBox, FluidCube, MPM_DX, MPM_N, MpmObject, RigidBox, RigidPipe, SphObject,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FluidRenderMode {
@@ -172,6 +174,7 @@ impl<T: SimulationBackend> State<T> {
         window: Arc<Window>,
         world: T::World,
         timeline: MpmTimeline,
+        export_grid: bool,
     ) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -357,6 +360,7 @@ impl<T: SimulationBackend> State<T> {
             &mpm_elastic_particles,
             &rigid_bodies,
             &inflow_sources,
+            export_grid,
         );
         let fluid_pipeline = RenderPipeline::new(
             &device,
@@ -494,6 +498,7 @@ impl<T: SimulationBackend> State<T> {
         T::simulate(self, &mut encoder);
         T::draw(self, &mut encoder, &view);
         self.queue.submit([encoder.finish()]);
+        self.mpm_fluid_sim.write_grid_export(&self.device)?;
         output.present();
         Ok(())
     }
@@ -557,6 +562,7 @@ impl<T: SimulationBackend> State<T> {
 pub struct Scene<T: SimulationBackend> {
     world: T::World,
     pub(crate) events: Vec<MpmSceneEvent>,
+    export_grid: bool,
 }
 
 impl<T: SimulationBackend + 'static> Scene<T> {
@@ -564,10 +570,16 @@ impl<T: SimulationBackend + 'static> Scene<T> {
         Self {
             world: T::World::default(),
             events: Vec::new(),
+            export_grid: false,
         }
     }
 
+    pub fn export_grid(&mut self, enabled: bool) {
+        self.export_grid = enabled;
+    }
+
     pub fn run(self) -> anyhow::Result<()> {
+        let export_grid = self.export_grid;
         #[cfg(not(target_arch = "wasm32"))]
         {
             env_logger::init();
@@ -581,12 +593,12 @@ impl<T: SimulationBackend + 'static> Scene<T> {
         let event_loop = EventLoop::with_user_event().build()?;
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut app = App::<T>::new(world, timeline);
+            let mut app = App::<T>::new(world, timeline, export_grid);
             event_loop.run_app(&mut app)?;
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let app = App::new(&event_loop, world, timeline);
+            let app = App::new(&event_loop, world, timeline, export_grid);
             event_loop.spawn_app(app);
         }
 
@@ -621,6 +633,7 @@ pub struct App<T: SimulationBackend> {
     world: Option<T::World>,
     timeline: Option<MpmTimeline>,
     state: Option<State<T>>,
+    export_grid: bool,
 }
 
 impl<T: SimulationBackend> App<T> {
@@ -628,6 +641,7 @@ impl<T: SimulationBackend> App<T> {
         #[cfg(target_arch = "wasm32")] event_loop: &EventLoop<State<T>>,
         world: T::World,
         timeline: MpmTimeline,
+        export_grid: bool,
     ) -> Self {
         #[cfg(target_arch = "wasm32")]
         let proxy = Some(event_loop.create_proxy());
@@ -635,6 +649,7 @@ impl<T: SimulationBackend> App<T> {
             world: Some(world),
             timeline: Some(timeline),
             state: None,
+            export_grid,
             #[cfg(target_arch = "wasm32")]
             proxy,
         }
@@ -669,18 +684,21 @@ impl<T: SimulationBackend + 'static> ApplicationHandler<State<T>> for App<T> {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.state =
-                Some(pollster::block_on(State::<T>::new(window, world, timeline)).unwrap());
+            self.state = Some(
+                pollster::block_on(State::<T>::new(window, world, timeline, self.export_grid))
+                    .unwrap(),
+            );
         }
 
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(proxy) = self.proxy.take() {
+                let export_grid = self.export_grid;
                 wasm_bindgen_futures::spawn_local(async move {
                     assert!(
                         proxy
                             .send_event(
-                                State::<T>::new(window, world, timeline)
+                                State::<T>::new(window, world, timeline, export_grid)
                                     .await
                                     .expect("Unable to create canvas!!!")
                             )
