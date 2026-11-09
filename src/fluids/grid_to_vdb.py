@@ -1,9 +1,8 @@
-import argparse
 import struct
-import sys
 from pathlib import Path
 
 import numpy as np
+import typer
 
 try:
     import pyopenvdb as vdb
@@ -44,26 +43,17 @@ def write_vdb(path, density, dx, origin):
     vdb.write(str(path), grids=[grid])
 
 
-def main():
-    argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else sys.argv[1:]
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("src", nargs="?", default="data", help="dump file or directory")
-    parser.add_argument("dst", nargs="?", default="data/vdb", help="output directory")
-    args = parser.parse_args(argv)
-
-    src = Path(args.src)
+def convert_grids(src: Path, dst: Path):
+    src = Path(src)
     paths = [src] if src.is_file() else sorted(src.glob("grid_*.bin"))
     if not paths:
-        raise SystemExit(f"no grid dumps in {src}")
+        typer.echo(f"no grid dumps in {src}", err=True)
+        raise typer.Exit(code=1)
 
-    dst = Path(args.dst)
+    dst = Path(dst)
     dst.mkdir(parents=True, exist_ok=True)
     for path in paths:
         frame, dx, origin, density = read_grid(path)
         out = dst / f"grid_{frame:06}.vdb"
         write_vdb(out, density, dx, origin)
-        print(out)
-
-
-if __name__ == "__main__":
-    main()
+        typer.echo(out)

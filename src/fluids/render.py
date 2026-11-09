@@ -1,9 +1,8 @@
 from pathlib import Path
+
 import bpy
 import numpy as np
 import typer
-
-app = typer.Typer(add_completion=False)
 
 
 def water_material():
@@ -162,14 +161,7 @@ def setup_render(nframes: int, output_dir: Path):
     scene.render.filepath = str(output_dir.resolve()) + "/"
 
 
-@app.command()
-def main(
-    vdb_dir: Path = typer.Argument(..., help="Directory containing the VDB sequence"),
-    output_dir: Path = typer.Argument(..., help="Directory to save rendered frames"),
-    threshold: float = typer.Option(
-        0.1, help="Threshold value for volume-to-mesh conversion"
-    ),
-):
+def run_render(vdb_dir: Path, output_dir: Path, threshold: float):
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
 
@@ -190,7 +182,3 @@ def main(
     typer.echo(f"Starting render of {nframes} frames to {output_dir.resolve()}...")
     bpy.ops.render.render(animation=True)
     typer.echo("Rendering complete!")
-
-
-if __name__ == "__main__":
-    app()
